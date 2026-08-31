@@ -27,6 +27,7 @@ async function setupBindingSession(services: ReturnType<typeof getServices>) {
 
 export async function GET() {
   const services = getServices();
+  services.reset();
   const session = services.createSession();
   const orderId = session.logicalOrderId;
 
@@ -46,8 +47,10 @@ export async function GET() {
       const fresh = await setupBindingSession(services);
       bindingState = fresh.session.state;
       const actualOrderId = claims.orderId === BINDING_ORDER_SENTINEL ? fresh.session.externalOrderId! : claims.orderId;
-      if (razorpayAdapter instanceof MockRazorpayAdapter) {
-        razorpayAdapter.setSimulation(claims.simulate as ConstructorParameters<typeof MockRazorpayAdapter>[0]["simulatePayment"]);
+      if (razorpayAdapter.isMock) {
+        (razorpayAdapter as MockRazorpayAdapter).setSimulation(
+          claims.simulate as ConstructorParameters<typeof MockRazorpayAdapter>[0]["simulatePayment"],
+        );
       }
       try {
         const signature = razorpaySignature(services.razorpayKeySecret, `${actualOrderId}|${claims.paymentId}`);
@@ -55,8 +58,8 @@ export async function GET() {
         bindingState = result.state;
         return result.ok ? { ok: true, reasons: [], state: result.state } : { ok: false, reasons: [result.error ?? "rejected"], state: result.state };
       } finally {
-        if (razorpayAdapter instanceof MockRazorpayAdapter) {
-          razorpayAdapter.setSimulation(undefined);
+        if (razorpayAdapter.isMock) {
+          (razorpayAdapter as MockRazorpayAdapter).setSimulation(undefined);
         }
       }
     };

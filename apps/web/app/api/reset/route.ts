@@ -5,16 +5,12 @@ export const runtime = "nodejs";
 
 export async function POST() {
   const services = getServices();
+  services.reset();
   const session = services.createSession();
   return NextResponse.json({
+    ok: true,
     orderId: session.logicalOrderId,
     state: session.state,
-    customerId: session.customerId,
-    rails: services.registry.all().map((adapter) => ({ rail: adapter.rail, isMock: adapter.isMock })),
-    indicators: {
-      razorpay: services.isMock ? "mock" : "live",
-      x402: "mock",
-      llm: services.llm.enabled ? services.llm.name : "disabled",
-    },
+    message: "Fresh-demo reset complete: sessions, envelopes, webhook dedup and machine resource state cleared.",
   });
 }

@@ -37,6 +37,11 @@ export default function HomePage() {
   const [machineSpend, setMachineSpend] = useState<MachineSpendInfo | null>(null);
   const [quote, setQuote] = useState<QuoteResult | null>(null);
   const [rails, setRails] = useState<{ rail: string; isMock: boolean }[]>([]);
+  const [indicators, setIndicators] = useState<{ razorpay: string; x402: string; llm: string }>({
+    razorpay: "mock",
+    x402: "mock",
+    llm: "disabled",
+  });
   const [timeline, setTimeline] = useState<AuditEvent[]>([]);
   const [conformance, setConformance] = useState<ConformanceReport | null>(null);
   const [paymentIds, setPaymentIds] = useState<{ orderId?: string; paymentId?: string; signature?: string } | null>(null);
@@ -79,7 +84,8 @@ export default function HomePage() {
     const data = await response.json();
     setOrderId(data.orderId);
     setOrderState(data.state);
-    setRails(data.mockRails ?? []);
+    setRails(data.rails ?? []);
+    setIndicators(data.indicators ?? { razorpay: "mock", x402: "mock", llm: "disabled" });
     pushAgent("Hi, I'm the RunVista assistant. Tell me what you're looking for — e.g. \u201cblack running shoes under ₹5,000\u201d.");
     setBusy(false);
   }, [pushAgent]);
@@ -327,6 +333,57 @@ export default function HomePage() {
     setBusy(false);
   }, [orderId]);
 
+  const resetDemo = useCallback(async () => {
+    setBusy(true);
+    const response = await fetch("/api/reset", { method: "POST" });
+    const data = await response.json();
+    setOrderId(data.orderId);
+    setOrderState(data.state);
+    setMessages([]);
+    setQuestions([]);
+    setQuickReplies([]);
+    setMatches(null);
+    setFitScores(null);
+    setMachineSpend(null);
+    setQuote(null);
+    setTimeline([]);
+    setConformance(null);
+    setPaymentIds(null);
+    setNotice(null);
+    pushAgent("Server state reset. Fresh conversation started.");
+    setBusy(false);
+  }, [pushAgent]);
+
+  const runScenario = useCallback(async () => {
+    setBusy(true);
+    setNotice(null);
+    setMessages([]);
+    setQuestions([]);
+    setQuickReplies([]);
+    setMatches(null);
+    setFitScores(null);
+    setMachineSpend(null);
+    setQuote(null);
+    setPaymentIds(null);
+    const response = await fetch("/api/scenario");
+    const data = await response.json();
+    setOrderId(data.orderId);
+    setOrderState(data.state);
+    setTimeline(data.events ?? []);
+    pushAgent("Hi, I'm the RunVista assistant. Tell me what you're looking for.");
+    pushAgent("I need black shoes under ₹5,000.");
+    for (const clarification of ["UK 9", "Road running up to 10K", "Wide fit", "Cushioning preferred", "Must be returnable", "Delivery before Sunday"]) {
+      pushAgent(clarification);
+    }
+    if (data.final?.message) pushAgent(data.final.message);
+    if (data.final?.kind === "shortlist") {
+      setMatches(data.final.matches);
+      setFitScores(Object.fromEntries((data.final.fitScores ?? []).map((s: { productId: string; fitScore: number; note: string }) => [s.productId, s])));
+      setMachineSpend(data.machineSpend ?? data.final.machineSpend ?? null);
+    }
+    setBusy(false);
+  }, [pushAgent]);
+
   const isMock = rails.find((r) => r.rail === "razorpay_checkout")?.isMock ?? true;
 
   return (
@@ -336,13 +393,25 @@ export default function HomePage() {
           <h1>AgentReady Commerce</h1>
           <div className="sub">RunVista Sports — merchant-specific agentic storefront</div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span className={`badge ${isMock ? "mock" : "live"}`}>
-            Razorpay {isMock ? "MOCK adapter" : "test-mode"}
+            Razorpay {isMock ? "MOCK" : "live"}
+          </span>
+          <span className={`badge ${indicators.x402 === "live" ? "live" : "mock"}`}>
+            x402 {indicators.x402 === "live" ? "live" : "MOCK"}
+          </span>
+          <span className={`badge ${indicators.llm === "disabled" ? "mock" : "live"}`}>
+            LLM {indicators.llm === "disabled" ? "disabled" : indicators.llm}
           </span>
           <span className={`state ${stateTone(orderState)}`}>{orderState}</span>
+          <button className="btn" onClick={runScenario} disabled={busy}>
+            Run prepared scenario
+          </button>
           <button className="btn" onClick={startSession} disabled={busy}>
             New conversation
+          </button>
+          <button className="btn" onClick={resetDemo} disabled={busy}>
+            Reset server state
           </button>
         </div>
       </header>

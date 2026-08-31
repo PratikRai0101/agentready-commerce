@@ -27,7 +27,7 @@ pnpm dev                    # http://localhost:3000
 ```
 
 ```bash
-pnpm test                   # 77 tests: unit, adversarial, integration, conformance
+pnpm test                   # 106 tests: unit, adversarial, integration, conformance
 pnpm typecheck
 ```
 
