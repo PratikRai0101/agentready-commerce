@@ -24,6 +24,7 @@ import {
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
 import { intentDigest, mergeIntents, parseIntentMessage, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
+import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 
 export type Session = {
   logicalOrderId: string;
@@ -86,6 +87,7 @@ export type AppServices = {
   razorpayKeySecret: string;
   webhookSecret: string | undefined;
   isMock: boolean;
+  llm: LlmProvider;
 };
 
 const DEMO_CUSTOMER = "cust_demo_01";
@@ -104,7 +106,7 @@ function buildMandate(customerId: string): PurchaseMandate {
   };
 }
 
-export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { forceMock?: boolean }): AppServices {
+export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { forceMock?: boolean; llm?: LlmProvider }): AppServices {
   const globalServices = globalThis as unknown as { __agentreadyServices?: AppServices };
   if (globalServices.__agentreadyServices) {
     return globalServices.__agentreadyServices;
@@ -128,6 +130,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const webhookDedup = new Map<string, string>();
   const signingSecret = env.ENVELOPE_SIGNING_SECRET ?? "dev-secret-change-me";
   const machineResource = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
+  const llm = options?.llm ?? createLlmProvider(env);
 
   const services: AppServices = {
     registry,
@@ -135,6 +138,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
     razorpayKeySecret,
     webhookSecret,
     isMock: registry.isMock("razorpay_checkout"),
+    llm,
 
     createSession() {
       const logicalOrderId = newId("ord");
@@ -181,6 +185,36 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       session.intent = mergeIntents(session.intent, parsed);
       session.message = message;
 
+      if (llm.enabled) {
+        const soft = await llm.extractSoftPreferences(message);
+        if (soft) {
+          const applied: string[] = [];
+          if (soft.fit && !session.intent.fit) {
+            session.intent.fit = soft.fit;
+            applied.push("fit");
+          }
+          if (soft.cushioning && !session.intent.cushioning) {
+            session.intent.cushioning = soft.cushioning;
+            applied.push("cushioning");
+          }
+          if (soft.distanceKm !== undefined && !session.intent.distanceKm) {
+            session.intent.distanceKm = soft.distanceKm;
+            applied.push("distanceKm");
+          }
+          if (applied.length > 0) {
+            void audit.log({
+              logicalOrderId: orderId,
+              type: "llm.soft_preferences_extracted",
+              actor: "agent",
+              summary: `LLM enrichment applied to soft preferences: ${applied.join(", ")}`,
+              inputDigest: intentDigest(session.intent),
+              decision: "allow",
+              reasonCodes: ["llm_advisory_only"],
+            });
+          }
+        }
+      }
+
       if (session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED") {
         const intent: PurchaseIntent = {
           merchantId: SHOE_CATALOG.merchantId,
@@ -223,7 +257,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const machineSpend = !session.machineSpend && session.intent.fit
           ? runFitScoreSpend(session, machineResource, audit, orderId)
           : undefined;
-        const message = composeShortlist(session, ranking, machineSpend);
+        const message = await composeShortlistMessage(session, ranking, machineSpend, llm);
         void audit.log({
           logicalOrderId: orderId,
           type: "intent.shortlist_ranked",
@@ -879,11 +913,25 @@ function composeClarification(session: Session, missingNames: string[]): string 
   return `${preamble}Before I shortlist, I need ${missingNames.length} details: ${missingNames.join(", ")}.`;
 }
 
-function composeShortlist(session: Session, ranking: RankingResult, machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }): string {
+async function composeShortlistMessage(
+  session: Session,
+  ranking: RankingResult,
+  machineSpend: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string } | undefined,
+  llm: LlmProvider,
+): Promise<string> {
   const best = ranking.matches[0];
   if (!best) return "No products satisfy your constraints with current stock.";
   const spendNote = machineSpend
     ? ` I spent ${machineSpend.amount} USDC via x402 v2 on Solana Devnet (${machineSpend.mock ? "MOCK demo settlement" : "live settlement"}, tx ${machineSpend.txHash.slice(0, 16)}…) on a premium wide-fit scoring pass — the fit scores below are grounded in that paid resource.`
     : "";
+  if (llm.enabled) {
+    const explanation = await llm.explainRecommendation({
+      message: session.message,
+      matches: ranking.matches.map(productMatchToExplainInput),
+    });
+    if (explanation) {
+      return `${explanation}${spendNote}`;
+    }
+  }
   return `Here are your top ${ranking.matches.length} matches. Best under the stated evidence: ${best.product.name} (₹${(best.product.priceMinor / 100).toFixed(2)}, score ${best.score}).${spendNote}`;
 }
