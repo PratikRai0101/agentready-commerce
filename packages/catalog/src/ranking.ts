@@ -23,9 +23,6 @@ export function missingHardConstraints(intent: PurchaseIntent): MissingConstrain
       options: ["road", "trail", "gym", "casual"],
     });
   }
-  if (!c.deliverBy && !intent.softPreferences.some((p) => p.name === "delivery")) {
-    missing.push({ name: "deliverBy", label: "Delivery deadline (e.g. this Sunday)" });
-  }
   return missing;
 }
 

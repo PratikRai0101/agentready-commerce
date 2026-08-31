@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const { orderId, replay } = (await request.json()) as { orderId: string; replay?: boolean };
   const services = getServices();
-  if (!services.registry.isMock("razorpay_checkout")) {
+  if (!services.isMock) {
     return NextResponse.json({ error: "Webhook simulation requires mock mode" }, { status: 409 });
   }
 
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
       },
     },
   };
-  const signature = razorpaySignature("mock_secret", JSON.stringify(payload));
-  const outcome = processRazorpayWebhook(services, payload, signature, "mock_secret");
+  const signature = razorpaySignature(services.webhookSecret ?? "mock_secret", JSON.stringify(payload));
+  const outcome = processRazorpayWebhook(services, payload, signature, services.webhookSecret ?? "mock_secret");
   return NextResponse.json({ ...outcome, simulated: true, replay });
 }

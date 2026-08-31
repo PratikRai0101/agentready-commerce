@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import { newId } from "@agentready/domain";
 import type { CommerceEnvelope, PaymentRail } from "@agentready/domain";
 import { razorpaySignature } from "./razorpay";
@@ -88,5 +88,5 @@ export class MockRazorpayAdapter implements PaymentAdapter {
 function timingSafeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a, "utf8");
   const bufB = Buffer.from(b, "utf8");
-  return bufA.length === bufB.length && createHmac("sha256", bufA).update(bufB).digest() === createHmac("sha256", bufB).update(bufA).digest();
+  return bufA.length === bufB.length && nodeTimingSafeEqual(bufA, bufB);
 }

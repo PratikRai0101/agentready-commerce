@@ -67,10 +67,14 @@ export type AppServices = {
   getEnvelope(orderId: string): EnvelopeRecord | undefined;
   getMandate(customerId: string): PurchaseMandate | undefined;
   isWebhookProcessed(eventId: string): boolean;
+  markWebhookProcessed(eventId: string): void;
   markVerifiedFromWebhook(orderId: string, paymentId: string, orderIdExternal: string): Promise<void>;
   policyCheck(orderId: string, rail: string, candidate?: CommerceEnvelope): { allow: boolean; reasonCodes: string[] };
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
+  razorpayKeySecret: string;
+  webhookSecret: string | undefined;
+  isMock: boolean;
 };
 
 const DEMO_CUSTOMER = "cust_demo_01";
@@ -89,17 +93,22 @@ function buildMandate(customerId: string): PurchaseMandate {
   };
 }
 
-export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
+export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { forceMock?: boolean }): AppServices {
   const globalServices = globalThis as unknown as { __agentreadyServices?: AppServices };
   if (globalServices.__agentreadyServices) {
     return globalServices.__agentreadyServices;
   }
 
+  const razorpayKeySecret = env.RAZORPAY_KEY_SECRET ?? "mock_secret";
+  const forceMock = options?.forceMock === true;
   const registry = createAdapterRegistry({
     razorpayKeyId: env.RAZORPAY_KEY_ID,
-    razorpayKeySecret: env.RAZORPAY_KEY_SECRET,
+    razorpayKeySecret,
     razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET,
+    forceMock,
   });
+  const webhookSecret =
+    env.RAZORPAY_WEBHOOK_SECRET ?? (registry.isMock("razorpay_checkout") ? "mock_secret" : undefined);
   const store = new MemoryAuditStore();
   const audit = createAuditLedger(store);
   const sessions = new Map<string, Session>();
@@ -111,6 +120,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
   const services: AppServices = {
     registry,
     audit,
+    razorpayKeySecret,
+    webhookSecret,
+    isMock: registry.isMock("razorpay_checkout"),
 
     createSession() {
       const logicalOrderId = newId("ord");
@@ -402,8 +414,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
       const session = sessions.get(orderId);
       if (!session || !session.externalOrderId) throw new Error("No initiated order");
       const paymentId = `pay_MOCK_${session.externalOrderId}_${Date.now()}`;
-      const secret = process.env.RAZORPAY_KEY_SECRET ?? "mock_secret";
-      const signature = razorpaySignature(secret, `${session.externalOrderId}|${paymentId}`);
+      const signature = razorpaySignature(razorpayKeySecret, `${session.externalOrderId}|${paymentId}`);
       return { paymentId, signature, orderId: session.externalOrderId };
     },
 
@@ -463,6 +474,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
       if (session.state !== "PAID_VERIFIED") {
         return { ok: false, state: session.state, error: `Fulfilment requires PAID_VERIFIED, current state ${session.state}` };
       }
+      setState(session, "FULFILMENT_PENDING");
       if (fail) {
         setState(session, "FULFILMENT_FAILED");
         void audit.log({
@@ -599,6 +611,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
 
     isWebhookProcessed(eventId) {
       return webhookDedup.has(eventId);
+    },
+
+    markWebhookProcessed(eventId) {
+      webhookDedup.set(eventId, new Date().toISOString());
     },
 
     async markVerifiedFromWebhook(orderId, paymentId, orderIdExternal) {

@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { CommerceEnvelope } from "./types";
 
 function canonicalStringify(value: unknown): string {
@@ -45,7 +45,7 @@ export function verifyEnvelopeSignature(
   const expected = signEnvelope(envelope, secret);
   const a = Buffer.from(expected, "utf8");
   const b = Buffer.from(signature, "utf8");
-  return a.length === b.length && createHmac("sha256", secret).update(a).digest() === createHmac("sha256", secret).update(b).digest();
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function randomHex(bytes = 16): string {

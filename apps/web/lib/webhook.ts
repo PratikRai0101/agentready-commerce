@@ -71,6 +71,8 @@ export function processRazorpayWebhook(
     externalReferences: { eventId, paymentId: entity.id, orderId: entity.order_id ?? "" },
   });
 
+  services.markWebhookProcessed(eventId);
+
   if (body.event === "payment.captured" && entity.status === "captured" && session.state === "PAYMENT_PENDING") {
     void services.markVerifiedFromWebhook(session.logicalOrderId, entity.id, entity.order_id ?? "");
   }
