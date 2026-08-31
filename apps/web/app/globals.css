@@ -37,6 +37,7 @@ html {
   font-size: 16px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
 body {
@@ -45,6 +46,7 @@ body {
   color: var(--text);
   line-height: 1.5;
   min-height: 100dvh;
+  overflow-x: hidden;
 }
 
 /* ─── Layout ─── */
@@ -165,6 +167,31 @@ body {
 @media (max-width: 960px) {
   .page-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    padding: 12px 16px;
+  }
+  .topbar-nav {
+    gap: 12px;
+  }
+  .topbar-nav a,
+  .topbar-nav button {
+    font-size: 12px;
+  }
+  .content-col {
+    padding: 0 16px 16px;
+  }
+  .chat-header {
+    padding: 16px 16px 8px;
+  }
+  .chat-messages {
+    padding: 0 16px 12px;
+  }
+  .demo-grid {
+    padding: 0 16px 16px;
   }
 }
 
@@ -951,6 +978,28 @@ body {
 @supports (padding: env(safe-area-inset-bottom)) {
   .composer {
     padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ─── Mobile chat layout ─── */
+
+@media (max-width: 960px) {
+  .chat-col {
+    max-height: 50vh;
+  }
+  .chat-messages {
+    max-height: 30vh;
+  }
+}
+
+/* ─── Reduced motion ─── */
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer {
+    transition: none;
+  }
+  .drawer-scrim {
+    transition: none;
   }
 }
 
