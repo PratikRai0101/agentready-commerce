@@ -5,24 +5,19 @@ import type { ProductMatch } from "@agentready/catalog";
 type Props = {
   match: ProductMatch;
   fitScore?: { fitScore: number; note: string };
+  roleLabel: string;
   onSelect: (productId: string) => void;
   disabled: boolean;
+  showSelect: boolean;
 };
 
-const ROLE_LABELS: Record<number, string> = {
-  0: "Best overall match",
-  1: "Cheaper alternative",
-  2: "Trade-off choice",
-};
-
-export function ProductCard({ match, fitScore, onSelect, disabled }: Props) {
+export function ProductCard({ match, fitScore, roleLabel, onSelect, disabled, showSelect }: Props) {
   const { product, score, reasons, compromises } = match;
   const price = `\u20B9${(product.priceMinor / 100).toLocaleString("en-IN")}`;
-  const roleIdx = score > 80 ? 0 : score > 60 ? 1 : 2;
 
   return (
     <article className="product-card" aria-label={product.name}>
-      <div className="product-card-badge">{ROLE_LABELS[roleIdx] ?? "Option"}</div>
+      <div className="product-card-badge">{roleLabel}</div>
       {product.image && (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -73,14 +68,16 @@ export function ProductCard({ match, fitScore, onSelect, disabled }: Props) {
           >
             Why this one?
           </button>
-          <button
-            className="product-card-select"
-            type="button"
-            onClick={() => onSelect(product.productId)}
-            disabled={disabled}
-          >
-            Select this shoe
-          </button>
+          {showSelect && (
+            <button
+              className="product-card-select"
+              type="button"
+              onClick={() => onSelect(product.productId)}
+              disabled={disabled}
+            >
+              Select
+            </button>
+          )}
         </div>
       </div>
     </article>

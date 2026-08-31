@@ -767,20 +767,72 @@ body {
 }
 
 .timeline-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
   font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.timeline-row:last-child {
+  border-bottom: none;
 }
 
 .timeline-row .event {
   color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .timeline-row .time {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.drawer-tech-toggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-family: var(--font-body);
+}
+
+.drawer-tech-toggle:hover {
+  color: var(--text);
+}
+
+.tech-event {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.tech-event:last-child {
+  border-bottom: none;
+}
+
+.tech-event-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
+.drawer {
+  overflow-x: hidden;
 }
 
 /* ─── Demo Lab ─── */
