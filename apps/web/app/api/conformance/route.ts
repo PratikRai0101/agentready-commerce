@@ -38,6 +38,10 @@ export async function GET() {
           const result = await services.verifyPayment(orderId, session.externalOrderId ?? "order_X", "pay_forged", "deadbeef");
           return { verified: result.ok, reason: result.error };
         }
+        const current = services.getSession(orderId);
+        if (current?.state === "PAYMENT_FAILED") {
+          await services.initiatePayment(orderId, "razorpay_checkout");
+        }
         const capture = await services.mockCapture(orderId);
         const result = await services.verifyPayment(orderId, capture.orderId, capture.paymentId, capture.signature);
         return { verified: result.ok, reason: result.error };

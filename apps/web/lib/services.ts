@@ -368,6 +368,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       }
 
       if (session.externalOrderId) {
+        if (session.state === "PAYMENT_FAILED") {
+          setState(session, "PAYMENT_PENDING");
+        }
         const attempt: PaymentAttempt = {
           attemptId: newId("att"),
           logicalOrderId: orderId,

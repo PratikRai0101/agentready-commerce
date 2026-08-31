@@ -21,7 +21,13 @@ export function parseIntentMessage(message: string): ParsedIntent {
   const text = message.toLowerCase().replace(/[,.]/g, " ");
   const parsed: ParsedIntent = {};
 
-  const amountMatch = text.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d,]+)/);
+  const distanceMatch = text.match(/(\d{1,3})\s*k\s*m?\b/);
+  if (distanceMatch) {
+    parsed.distanceKm = Number(distanceMatch[1]);
+  }
+  const textWithoutDistance = text.replace(/\d{1,3}\s*k\s*m?\b/g, " DIST ");
+
+  const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s]*)/);
   if (amountMatch) {
     parsed.maxAmountMinor = parseIndianAmount(amountMatch[1]!);
   }
@@ -46,11 +52,6 @@ export function parseIntentMessage(message: string): ParsedIntent {
   if (colour) parsed.colour = colour;
 
   if (/\breturn\w*\b/.test(text)) parsed.mustBeReturnable = true;
-
-  const distanceMatch = text.match(/(\d{1,3})\s*k\b|(\d{1,3})\s*km/);
-  if (distanceMatch) {
-    parsed.distanceKm = Number(distanceMatch[1] ?? distanceMatch[2]);
-  }
 
   for (const [index, day] of DAYS.entries()) {
     if (text.includes(day)) {

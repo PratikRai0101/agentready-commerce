@@ -79,6 +79,20 @@ describe("payment flow", () => {
     expect(session.state).toBe("PAYMENT_FAILED");
   });
 
+  it("allows a fresh payment attempt after failure", async () => {
+    const { services, orderId, session } = await runToPaid();
+    await services.initiatePayment(orderId, "razorpay_checkout");
+    await services.verifyPayment(orderId, "order_X", "pay_X", "forged");
+    expect(session.state).toBe("PAYMENT_FAILED");
+    const retry = await services.initiatePayment(orderId, "razorpay_checkout");
+    expect(retry.ok).toBe(true);
+    expect(session.state).toBe("PAYMENT_PENDING");
+    const capture = await services.mockCapture(orderId);
+    const verified = await services.verifyPayment(orderId, capture.orderId, capture.paymentId, capture.signature);
+    expect(verified.ok).toBe(true);
+    expect(session.state).toBe("PAID_VERIFIED");
+  });
+
   it("blocks payment when the envelope is tampered after approval", async () => {
     const { services, orderId } = await runToPaid();
     const tamper = await services.tamper(orderId, "price");
