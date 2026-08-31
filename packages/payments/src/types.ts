@@ -1,5 +1,7 @@
 import type { CommerceEnvelope, PaymentRail } from "@agentready/domain";
 
+export type { PaymentRail };
+
 export type PaymentAttempt = {
   attemptId: string;
   logicalOrderId: string;

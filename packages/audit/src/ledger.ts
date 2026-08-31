@@ -51,7 +51,7 @@ export function createAuditLedger(store: AuditStore): AuditLedger {
     async log(input) {
       const event: AuditEvent = {
         ...input,
-        eventId: input.eventId ?? newId("evt"),
+        eventId: newId("evt"),
         occurredAt: input.occurredAt ?? new Date().toISOString(),
       };
       await store.append(event);

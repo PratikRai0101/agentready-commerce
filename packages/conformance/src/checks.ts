@@ -39,10 +39,7 @@ export async function runCriticalInvariants(
 
   const tampered = options?.makeTampered
     ? options.makeTampered(structuredClone(envelope))
-    : {
-        ...structuredClone(envelope),
-        items: [{ ...structuredClone(envelope.items[0]), quantity: 99 }],
-      };
+    : buildTampered(envelope);
 
   checks.push(
     await check(
@@ -54,6 +51,7 @@ export async function runCriticalInvariants(
           envelope,
           mandate: undefined,
           expectedDigest: envelopeDigest(envelope),
+          approved: true,
           allowAutoApprove: false,
         });
         return { pass: !verdict.allow, detail: `Blocked with ${verdict.reasonCodes.join(", ")}` };
@@ -67,11 +65,11 @@ export async function runCriticalInvariants(
       "No payment for an unapproved envelope",
       "An envelope without an approval event must not reach payment initiation.",
       async () => {
-        const unapproved = { ...envelope, approvalEventId: undefined };
         const verdict = checkEnvelopeForPayment({
-          envelope: unapproved,
+          envelope,
           mandate,
-          expectedDigest: envelopeDigest(unapproved),
+          expectedDigest: envelopeDigest(envelope),
+          approved: false,
           allowAutoApprove: false,
         });
         return { pass: !verdict.allow, detail: `Blocked with ${verdict.reasonCodes.join(", ")}` };
@@ -92,6 +90,7 @@ export async function runCriticalInvariants(
           envelope: tampered,
           mandate,
           expectedDigest: approvedDigest,
+          approved: true,
           allowAutoApprove: false,
         });
         return {
@@ -188,4 +187,15 @@ async function check(
       detail: `Conformance check errored: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+function buildTampered(envelope: CommerceEnvelope): CommerceEnvelope {
+  const first = envelope.items[0];
+  if (!first) {
+    throw new Error("Conformance requires an envelope with at least one item");
+  }
+  return {
+    ...structuredClone(envelope),
+    items: [{ ...structuredClone(first), quantity: first.quantity + 1 }],
+  };
 }

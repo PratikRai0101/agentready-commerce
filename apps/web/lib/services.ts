@@ -220,6 +220,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env): AppServices {
       const product = SHOE_CATALOG.products.find((p) => p.productId === productId);
       if (!product) throw new Error(`Unknown product ${productId}`);
       const size = session.intent.size;
+      if (!size) throw new Error("Size is required before quoting");
       const variant = product.variants.find((v) => v.size === size);
       if (!variant) {
         throw new Error(`Size ${size} not available for ${product.name}`);

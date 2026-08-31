@@ -17,6 +17,7 @@
     "@agentready/domain": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^26.4.0",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
   }
