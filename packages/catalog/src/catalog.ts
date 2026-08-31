@@ -25,6 +25,7 @@ export type CatalogProduct = {
   deliveryLeadDays: number;
   rating: number;
   description: string;
+  image?: string;
   variants: CatalogVariant[];
 };
 
@@ -81,6 +82,7 @@ export const SHOE_CATALOG: Catalog = {
       deliveryLeadDays: 3,
       rating: 4.6,
       description: "Balanced daily road trainer for 5–15K runs.",
+      image: "/images/products/streak-4.png",
       variants: [
         { sku: "STRK4-BLK-9", size: "UK 9", inStock: 6 },
         { sku: "STRK4-BLK-10", size: "UK 10", inStock: 2 },
@@ -102,6 +104,7 @@ export const SHOE_CATALOG: Catalog = {
       deliveryLeadDays: 3,
       rating: 4.7,
       description: "Maximum cushioning, wide fit, for recovery and long easy runs.",
+      image: "/images/products/max-cushion.png",
       variants: [
         { sku: "VMAX-BLK-9", size: "UK 9", inStock: 4 },
         { sku: "VMAX-BLK-10", size: "UK 10", inStock: 0 },
@@ -123,6 +126,7 @@ export const SHOE_CATALOG: Catalog = {
       deliveryLeadDays: 5,
       rating: 4.3,
       description: "Lightweight minimal trainer for speedwork and tempo.",
+      image: "/images/products/stride-lite.png",
       variants: [
         { sku: "STRL-BLK-9", size: "UK 9", inStock: 9 },
         { sku: "STRL-BLK-10", size: "UK 10", inStock: 5 },
