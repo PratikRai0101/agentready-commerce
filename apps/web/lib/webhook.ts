@@ -1,9 +1,24 @@
 import { verifyRazorpayWebhookSignature } from "@agentready/payments";
 import type { AppServices } from "./services";
 
+export type WebhookMeta = {
+  event?: string;
+  eventId?: string;
+  paymentId?: string;
+  orderId?: string;
+};
+
 export type WebhookOutcome =
-  | { ok: true; deduplicated: boolean; processed: boolean; held: boolean; summary: string }
-  | { ok: false; error: string };
+  | ({
+      ok: true;
+      deduplicated: boolean;
+      processed: boolean;
+      held: boolean;
+      ignored?: boolean;
+      summary: string;
+      reasonCode: string;
+    } & WebhookMeta)
+  | ({ ok: false; error: string; reasonCode: string } & WebhookMeta);
 
 export type RazorpayWebhookPayload = {
   event: string;
@@ -22,6 +37,8 @@ export type RazorpayWebhookPayload = {
   };
 };
 
+const SUPPORTED_EVENTS = new Set(["payment.captured", "payment.authorized"]);
+
 export async function processRazorpayWebhookRaw(
   services: AppServices,
   rawBody: string,
@@ -29,8 +46,11 @@ export async function processRazorpayWebhookRaw(
   eventIdHeader: string | null,
   webhookSecret: string,
 ): Promise<WebhookOutcome> {
+  const meta: WebhookMeta = {};
+  let event = "unknown";
+
   if (!signature) {
-    return { ok: false, error: "Missing x-razorpay-signature header" };
+    return { ...meta, ok: false, error: "Missing x-razorpay-signature header", reasonCode: "missing_signature", event };
   }
 
   if (!verifyRazorpayWebhookSignature(webhookSecret, rawBody, signature)) {
@@ -42,33 +62,68 @@ export async function processRazorpayWebhookRaw(
       decision: "block",
       reasonCodes: ["webhook_signature_invalid"],
     });
-    return { ok: false, error: "Invalid webhook signature" };
+    return { ...meta, ok: false, error: "Invalid webhook signature", reasonCode: "invalid_signature", event };
   }
 
   let body: RazorpayWebhookPayload;
   try {
     body = JSON.parse(rawBody) as RazorpayWebhookPayload;
   } catch {
-    return { ok: false, error: "Malformed JSON webhook body" };
+    return { ...meta, ok: false, error: "Malformed JSON webhook body", reasonCode: "malformed_json", event };
   }
 
+  event = body.event;
+  meta.event = event;
   const entity = body.payload?.payment?.entity;
   if (!entity?.id) {
-    return { ok: false, error: "Malformed webhook payload: no payment entity" };
+    return { ...meta, ok: false, error: "Malformed webhook payload: no payment entity", reasonCode: "missing_payment_entity" };
   }
+  meta.paymentId = entity.id;
 
   const eventId = eventIdHeader ?? `${body.event}_${entity.id}`;
+  meta.eventId = eventId;
   if (services.isWebhookProcessed(eventId)) {
-    return { ok: true, deduplicated: true, processed: false, held: false, summary: `Deduplicated event ${eventId}` };
+    return {
+      ...meta,
+      ok: true,
+      deduplicated: true,
+      processed: false,
+      held: false,
+      summary: `Deduplicated event ${eventId}`,
+      reasonCode: "deduplicated",
+    };
+  }
+
+  if (!SUPPORTED_EVENTS.has(body.event)) {
+    void services.audit.log({
+      logicalOrderId: "unknown",
+      type: "webhook.ignored",
+      actor: "payment",
+      summary: `Webhook ${body.event} ignored: not a state-affecting payment event`,
+      externalReferences: { eventId, paymentId: entity.id },
+      decision: "review",
+      reasonCodes: ["unsupported_event_ignored"],
+    });
+    return {
+      ...meta,
+      ok: true,
+      deduplicated: false,
+      processed: false,
+      held: false,
+      ignored: true,
+      summary: `Ignored ${body.event}; no payment state change`,
+      reasonCode: "unsupported_event",
+    };
   }
 
   if (!entity.order_id) {
-    return { ok: false, error: "Webhook has no payment order_id; cannot bind to a session" };
+    return { ...meta, ok: false, error: "Webhook has no payment order_id; cannot bind to a session", reasonCode: "missing_order_id" };
   }
+  meta.orderId = entity.order_id;
 
   const session = services.findSessionByExternalOrderId(entity.order_id);
   if (!session) {
-    return { ok: false, error: `Webhook for unknown Razorpay order ${entity.order_id}` };
+    return { ...meta, ok: false, error: `Webhook for unknown Razorpay order ${entity.order_id}`, reasonCode: "unknown_order" };
   }
 
   void services.audit.log({
@@ -117,7 +172,7 @@ export async function processRazorpayWebhookRaw(
       decision: "block",
       reasonCodes: ["webhook_binding_failed"],
     });
-    return { ok: false, error: `Webhook binding rejected: ${bindingFailures.join("; ")}` };
+    return { ...meta, ok: false, error: `Webhook binding rejected: ${bindingFailures.join("; ")}`, reasonCode: "binding_failed" };
   }
 
   const isCapture = body.event === "payment.captured" || body.event === "payment.authorized";
@@ -130,11 +185,13 @@ export async function processRazorpayWebhookRaw(
       status: entity.status,
     });
     return {
+      ...meta,
       ok: true,
       deduplicated: false,
       processed: result.ok,
       held: false,
       summary: result.ok ? `Processed ${eventId}` : `Verified event held for review: ${result.reasons.join("; ")}`,
+      reasonCode: result.ok ? "accepted" : "state_unsuitable",
     };
   }
 
@@ -149,7 +206,15 @@ export async function processRazorpayWebhookRaw(
       decision: "review",
       reasonCodes: ["out_of_order_webhook_held"],
     });
-    return { ok: true, deduplicated: false, processed: false, held: true, summary: `Held for reconciliation: ${eventId}` };
+    return {
+      ...meta,
+      ok: true,
+      deduplicated: false,
+      processed: false,
+      held: true,
+      summary: `Held for reconciliation: ${eventId}`,
+      reasonCode: "held",
+    };
   }
 
   if (session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
@@ -163,8 +228,16 @@ export async function processRazorpayWebhookRaw(
       decision: "review",
       reasonCodes: ["rail_single_success"],
     });
-    return { ok: true, deduplicated: false, processed: true, held: false, summary: `Order already paid; noted ${eventId}` };
+    return {
+      ...meta,
+      ok: true,
+      deduplicated: false,
+      processed: true,
+      held: false,
+      summary: `Order already paid; noted ${eventId}`,
+      reasonCode: "accepted",
+    };
   }
 
-  return { ok: false, error: `Webhook cannot be applied in state ${session.state}` };
+  return { ...meta, ok: false, error: `Webhook cannot be applied in state ${session.state}`, reasonCode: "state_unsuitable" };
 }
