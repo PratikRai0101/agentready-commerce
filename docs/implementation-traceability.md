@@ -25,7 +25,7 @@ tests. Commit history in this repo follows the same phases.
 | 0 — decisions/access | Partially (Test Mode credentials present locally; devnet wallet pending) | `apps/web/.env.example`, `apps/web/.env.local` (gitignored), `docs/open-questions.md` |
 | 1 — vertical skeleton | Done | catalog + intent + ranking + storefront UI |
 | 2 — envelope + policy | Done | `packages/domain`, `approve`/`tamper` routes |
-| 3 — Razorpay end to end | Done (mock mode; live needs credentials) | `packages/payments`, `pay/*`, `webhook/*` routes |
+| 3 — Razorpay end to end | **Done — real Test Mode checkout, authenticated webhook, processed refund** (see [Razorpay Test Mode proof](#razorpay-test-mode-proof)) | `packages/payments`, `pay/*`, `webhook/*` routes |
 | 4 — failure theatre | Done | UI panel + `tamper`/`fulfil`/`compensate`/`webhook/simulate` routes |
 | 5 — x402/Solana | Protocol done; settlement mock | `packages/payments/src/x402.ts`, `apps/web/lib/machine.ts`, `machine.paid_resource` audit event |
 | 6 — conformance | 15 critical gates | `packages/conformance/src/checks.ts`, `apps/web/app/api/conformance/route.ts` |
@@ -71,9 +71,26 @@ tests. Commit history in this repo follows the same phases.
 ## Honesty boundaries
 
 - Mock adapters are explicit: `MockRazorpayAdapter.isMock`, `mock: "true"` on x402 audit events, UI badges.
-- No live Razorpay/x402 claims until a real Test Mode transaction and a Devnet settlement exist (`apps/web/.env.example`, README).
+- **Razorpay Test Mode is verified end-to-end** (checkout, authenticated webhook, processed refund); Live Mode is not claimed — see [Razorpay Test Mode proof](#razorpay-test-mode-proof) and `docs/evidence/razorpay-test-proof.md`.
 - Test Mode credentials live only in gitignored `apps/web/.env.local`; the UI badge shows "TEST MODE", never "live", for `rzp_test_` keys.
+- Webhook secrets are rotated, never logged; structured webhook logs emit only event type, event ID, safe order/payment IDs, HTTP status and reason code.
 - Conformance suite verifies declared invariants only — no third-party certification claims.
+
+## Razorpay Test Mode proof
+
+Completed against the real Razorpay Test Mode API with dashboard-configured
+`payment.captured` webhooks (raw-body HMAC verification, `x-razorpay-event-id`
+dedup, order/amount/currency/captured binding, out-of-order hold/reconcile):
+
+| Transaction | Order | Payment | Webhook event | Result |
+|---|---|---|---|---|
+| 1 — client-verified | `order_TWTuHSmXrkHoUJ` | `pay_TWU2Fy64pOAaZi` | — | ₹3848.00 INR captured; `payment.verified` |
+| 2 — webhook-verified | `order_TWVIgwsRyjV7C8` | `pay_TWVJ9xLsjtdwoo` | `TWVJJZ01UBcNy1` | ₹3548.00 INR; webhook HTTP 200 `accepted`; `payment.verified_via_webhook` |
+| 3 — webhook + refund | `order_TWVLQtCV7OXCmI` | `pay_TWVLknN4NRrHSN` | `TWVLtSP9a4RfZ4` | ₹4348.00 INR captured; fulfilment failure; refund `rfnd_TWVNeD4HStaNby` `processed`; state REFUNDED |
+
+Safe identifiers only; see `docs/evidence/razorpay-test-proof.md` for the
+judge-facing summary and `data/proof/razorpay-test-proof.md` (gitignored) for
+the detailed local record. Test date: 2026-08-31/2026-09-01 (local proof files).
 
 ## Definition-of-done status
 
@@ -84,6 +101,6 @@ tests. Commit history in this repo follows the same phases.
 | `.env.example` with no secrets | Done (`apps/web/.env.example`; local values only in gitignored `.env.local`) |
 | Architecture diagram | `docs/architecture.md` + README |
 | Meaningful tests and final results | 106 tests, 15/15 conformance gates |
-| Razorpay test-mode proof | **Pending** — needs `RAZORPAY_KEY_ID`/`SECRET` |
+| Razorpay test-mode proof | **Done** — real Test Mode checkout ×3, authenticated `payment.captured` webhook ×2, processed refund ×1 (`docs/implementation-traceability.md` § Razorpay Test Mode proof, `docs/evidence/razorpay-test-proof.md`) |
 | Five-minute pitch video | **Pending** |
 | Disclosure of mocks/synthetic data | Done (badges, audit `mock` flags, README) |
