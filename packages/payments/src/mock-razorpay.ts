@@ -15,6 +15,12 @@ export type MockRazorpayConfig = {
   keyId: string;
   keySecret: string;
   failInitiate?: boolean;
+  simulatePayment?: {
+    status?: "captured" | "authorized" | "failed" | "pending";
+    amountMinor?: number;
+    currency?: string;
+    orderId?: string;
+  };
 };
 
 export class MockRazorpayAdapter implements PaymentAdapter {
@@ -22,6 +28,10 @@ export class MockRazorpayAdapter implements PaymentAdapter {
   readonly isMock = true;
 
   constructor(private readonly config: MockRazorpayConfig) {}
+
+  setSimulation(simulatePayment?: MockRazorpayConfig["simulatePayment"]): void {
+    this.config.simulatePayment = simulatePayment;
+  }
 
   async initiate(envelope: CommerceEnvelope): Promise<PaymentAttempt> {
     if (this.config.failInitiate) {
@@ -64,14 +74,15 @@ export class MockRazorpayAdapter implements PaymentAdapter {
       };
     }
 
+    const simulated = this.config.simulatePayment ?? {};
     return {
       verified: true,
       rail: this.rail,
-      externalOrderId: input.externalOrderId,
+      externalOrderId: simulated.orderId ?? input.externalOrderId,
       externalPaymentId: input.externalPaymentId,
-      amountMinor: input.expectedAmountMinor ?? 0,
-      currency: "INR",
-      status: "captured",
+      amountMinor: simulated.amountMinor ?? input.expectedAmountMinor ?? 0,
+      currency: simulated.currency ?? "INR",
+      status: simulated.status ?? "captured",
     };
   }
 

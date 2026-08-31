@@ -39,6 +39,7 @@ export type Session = {
   verification?: VerificationResult;
   compensation?: { refundId?: string; reason?: string; ok: boolean };
   machineSpend?: { paymentIdentifier: string; settlementHash: string; fitScores: FitScore[] };
+  heldWebhook?: { eventId: string; paymentId: string; orderId: string };
 };
 
 export type EnvelopeRecord = {
@@ -70,7 +71,15 @@ export type AppServices = {
   getMandate(customerId: string): PurchaseMandate | undefined;
   isWebhookProcessed(eventId: string): boolean;
   markWebhookProcessed(eventId: string): void;
-  markVerifiedFromWebhook(orderId: string, paymentId: string, orderIdExternal: string): Promise<void>;
+  holdWebhook(orderId: string, held: { eventId: string; paymentId: string; orderId: string }): void;
+  markVerifiedFromWebhook(
+    orderId: string,
+    paymentId: string,
+    orderIdExternal: string,
+    claims?: { amountMinor?: number; currency?: string; status?: string },
+  ): Promise<{ ok: boolean; reasons: string[] }>;
+  findSessionByExternalOrderId(orderIdExternal: string): Session | undefined;
+  reset(): void;
   policyCheck(orderId: string, rail: string, candidate?: CommerceEnvelope): { allow: boolean; reasonCodes: string[] };
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
@@ -448,6 +457,19 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       const record = envelopes.get(orderId);
       if (!record) return { ok: false, state: session.state, error: "No envelope" };
 
+      if (externalOrderId !== session.externalOrderId) {
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "payment.binding_rejected",
+          actor: "policy",
+          summary: `Submitted Razorpay order ${externalOrderId} does not match session order ${session.externalOrderId}`,
+          decision: "block",
+          reasonCodes: ["order_id_mismatch"],
+        });
+        setState(session, "PAYMENT_FAILED");
+        return { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
+      }
+
       if (session.verification?.verified) {
         return { ok: true, state: session.state };
       }
@@ -465,31 +487,64 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       session.verification = result;
       session.externalPaymentId = externalPaymentId;
 
-      if (result.verified) {
-        setState(session, "PAID_VERIFIED");
+      if (!result.verified) {
+        setState(session, "PAYMENT_FAILED");
         void audit.log({
           logicalOrderId: orderId,
-          type: "payment.verified",
+          type: "payment.verification_failed",
           actor: "payment",
-          summary: `Payment ${externalPaymentId} verified (${result.amountMinor} ${result.currency})`,
-          externalReferences: { orderId: externalOrderId, paymentId: externalPaymentId },
-          decision: "allow",
-          reasonCodes: ["signature_verified", "rail_single_success"],
+          summary: `Payment verification failed: ${result.reason ?? "unknown"}`,
+          externalReferences: { paymentId: externalPaymentId },
+          decision: "block",
+          reasonCodes: ["signature_invalid"],
         });
-        return { ok: true, state: session.state };
+        return { ok: false, state: session.state, error: result.reason ?? "Verification failed" };
       }
 
-      setState(session, "PAYMENT_FAILED");
+      const bindingFailures: string[] = [];
+      if (result.externalOrderId !== session.externalOrderId) {
+        bindingFailures.push(`fetched payment order_id ${result.externalOrderId} does not match session order`);
+      }
+      if (result.amountMinor !== record.envelope.totalMinor) {
+        bindingFailures.push(`amount ${result.amountMinor} does not match approved envelope ${record.envelope.totalMinor}`);
+      }
+      if (result.currency !== record.envelope.currency) {
+        bindingFailures.push(`currency ${result.currency} does not match approved envelope ${record.envelope.currency}`);
+      }
+      if (result.status !== "captured") {
+        bindingFailures.push(`payment status is ${result.status}, not captured`);
+      }
+
+      if (bindingFailures.length > 0) {
+        setState(session, "PAYMENT_FAILED");
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "payment.binding_rejected",
+          actor: "policy",
+          summary: `Payment binding rejected: ${bindingFailures.join("; ")}`,
+          externalReferences: { paymentId: externalPaymentId },
+          decision: "block",
+          reasonCodes: ["rail_binding_failed"],
+        });
+        return { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` };
+      }
+
+      setState(session, "PAID_VERIFIED");
       void audit.log({
         logicalOrderId: orderId,
-        type: "payment.verification_failed",
+        type: "payment.verified",
         actor: "payment",
-        summary: `Payment verification failed: ${result.reason ?? "unknown"}`,
-        externalReferences: { paymentId: externalPaymentId },
-        decision: "block",
-        reasonCodes: ["signature_invalid"],
+        summary: `Payment ${externalPaymentId} verified (${result.amountMinor} ${result.currency}, ${result.status})`,
+        externalReferences: { orderId: externalOrderId, paymentId: externalPaymentId },
+        decision: "allow",
+        reasonCodes: ["signature_verified", "rail_binding_verified", "rail_single_success"],
       });
-      return { ok: false, state: session.state, error: result.reason ?? "Verification failed" };
+
+      if (session.heldWebhook) {
+        servicesReconcileHeld(orderId, session, audit, webhookDedup);
+      }
+
+      return { ok: true, state: session.state };
     },
 
     async fulfil(orderId, fail) {
@@ -641,12 +696,53 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       webhookDedup.set(eventId, new Date().toISOString());
     },
 
-    async markVerifiedFromWebhook(orderId, paymentId, orderIdExternal) {
+    holdWebhook(orderId, held) {
+      const session = sessions.get(orderId);
+      if (!session) return;
+      session.heldWebhook = held;
+    },
+
+    findSessionByExternalOrderId(orderIdExternal) {
+      for (const session of sessions.values()) {
+        if (session.externalOrderId === orderIdExternal) return session;
+      }
+      return undefined;
+    },
+
+    async markVerifiedFromWebhook(orderId, paymentId, orderIdExternal, claims) {
       const session = sessions.get(orderId);
       const record = envelopes.get(orderId);
-      if (!session || !record) return;
+      if (!session || !record) return { ok: false, reasons: ["no session or envelope"] };
+
+      const failures: string[] = [];
+      if (orderIdExternal !== session.externalOrderId) {
+        failures.push(`webhook order_id ${orderIdExternal} does not match session order`);
+      }
+      if (claims?.amountMinor !== undefined && claims.amountMinor !== record.envelope.totalMinor) {
+        failures.push(`webhook amount ${claims.amountMinor} does not match approved envelope ${record.envelope.totalMinor}`);
+      }
+      if (claims?.currency !== undefined && claims.currency !== record.envelope.currency) {
+        failures.push(`webhook currency ${claims.currency} does not match approved envelope ${record.envelope.currency}`);
+      }
+      if (claims?.status !== undefined && claims.status !== "captured") {
+        failures.push(`webhook status is ${claims.status}, not captured`);
+      }
+
+      if (failures.length > 0) {
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "webhook.binding_rejected",
+          actor: "policy",
+          summary: `Webhook payment rejected: ${failures.join("; ")}`,
+          externalReferences: { paymentId, orderId: orderIdExternal },
+          decision: "block",
+          reasonCodes: ["webhook_binding_failed"],
+        });
+        return { ok: false, reasons: failures };
+      }
+
       const eventId = `webhook_mark_${paymentId}`;
-      if (webhookDedup.has(eventId)) return;
+      if (webhookDedup.has(eventId)) return { ok: true, reasons: [] };
       webhookDedup.set(eventId, new Date().toISOString());
       session.externalPaymentId = paymentId;
       session.verification = {
@@ -666,7 +762,22 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Payment ${paymentId} captured (webhook) for ${formatMinor(record.envelope.totalMinor)}`,
         externalReferences: { paymentId, orderId: orderIdExternal },
         decision: "allow",
-        reasonCodes: ["webhook_verified", "rail_single_success"],
+        reasonCodes: ["webhook_verified", "rail_binding_verified", "rail_single_success"],
+      });
+      return { ok: true, reasons: [] };
+    },
+
+    reset() {
+      sessions.clear();
+      envelopes.clear();
+      mandates.clear();
+      webhookDedup.clear();
+      machineResource.reset();
+      void audit.log({
+        logicalOrderId: "system",
+        type: "system.reset",
+        actor: "system",
+        summary: "Fresh-demo reset: all sessions, envelopes, webhook dedup and machine resource state cleared",
       });
     },
   };
@@ -681,6 +792,27 @@ function setState(session: Session, next: OrderState): void {
     throw new Error(result.reason);
   }
   session.state = next;
+}
+
+function servicesReconcileHeld(
+  orderId: string,
+  session: Session,
+  audit: ReturnType<typeof createAuditLedger>,
+  webhookDedup: Map<string, string>,
+): void {
+  if (!session.heldWebhook) return;
+  const held = session.heldWebhook;
+  session.heldWebhook = undefined;
+  webhookDedup.set(held.eventId, new Date().toISOString());
+  void audit.log({
+    logicalOrderId: orderId,
+    type: "webhook.reconciled_after_client_verification",
+    actor: "payment",
+    summary: `Held webhook ${held.eventId} reconciled; order already verified on the Razorpay rail`,
+    externalReferences: { eventId: held.eventId, paymentId: held.paymentId },
+    decision: "allow",
+    reasonCodes: ["out_of_order_webhook_reconciled", "rail_single_success"],
+  });
 }
 
 function runFitScoreSpend(

@@ -171,14 +171,15 @@ describe("webhook deduplication", () => {
         },
       },
     };
-    const { processRazorpayWebhook } = await import("../lib/webhook");
-    const first = processRazorpayWebhook(services, payload, razorpaySign("mock_secret", JSON.stringify(payload)), "mock_secret");
+    const { processRazorpayWebhookRaw } = await import("../lib/webhook");
+    const rawBody = JSON.stringify(payload);
+    const first = await processRazorpayWebhookRaw(services, rawBody, razorpaySign("mock_secret", rawBody), "evt_svc_1", "mock_secret");
     expect(first.ok).toBe(true);
     if (!first.ok) throw new Error("unreachable");
     expect(first.deduplicated).toBe(false);
     expect(session.state).toBe("PAID_VERIFIED");
 
-    const second = processRazorpayWebhook(services, payload, razorpaySign("mock_secret", JSON.stringify(payload)), "mock_secret");
+    const second = await processRazorpayWebhookRaw(services, rawBody, razorpaySign("mock_secret", rawBody), "evt_svc_1", "mock_secret");
     expect(second.ok).toBe(true);
     if (!second.ok) throw new Error("unreachable");
     expect(second.deduplicated).toBe(true);
@@ -191,13 +192,13 @@ describe("webhook deduplication", () => {
 
   it("rejects webhooks with invalid signatures", async () => {
     const { services, orderId } = await runToPaid();
-    const { processRazorpayWebhook } = await import("../lib/webhook");
+    const { processRazorpayWebhookRaw } = await import("../lib/webhook");
     const payload = {
       event: "payment.captured",
       contains: ["payment"],
-      payload: { payment: { entity: { id: "pay_x", notes: { logicalOrderId: orderId } } } },
+      payload: { payment: { entity: { id: "pay_x", order_id: "order_X", notes: { logicalOrderId: orderId } } } },
     };
-    const outcome = processRazorpayWebhook(services, payload, "forged", "mock_secret");
+    const outcome = await processRazorpayWebhookRaw(services, JSON.stringify(payload), "forged", "evt_bad_1", "mock_secret");
     expect(outcome.ok).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { razorpaySignature } from "@agentready/payments";
 import { getServices } from "@/lib/services";
-import { processRazorpayWebhook } from "@/lib/webhook";
+import { processRazorpayWebhookRaw } from "@/lib/webhook";
 
 export const runtime = "nodejs";
 
@@ -20,8 +20,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No Razorpay order initiated for this session" }, { status: 400 });
   }
 
+  const record = services.getEnvelope(orderId);
   const paymentId = session.externalPaymentId ?? `pay_MOCK_${session.externalOrderId}`;
-  const payload = {
+
+  const rawBody = JSON.stringify({
     event: "payment.captured",
     contains: ["payment"],
     payload: {
@@ -29,15 +31,25 @@ export async function POST(request: Request) {
         entity: {
           id: paymentId,
           order_id: session.externalOrderId,
-          amount: session.verification?.amountMinor ?? 0,
-          currency: "INR",
+          amount: record?.envelope.totalMinor ?? 0,
+          currency: record?.envelope.currency ?? "INR",
           status: "captured",
           notes: { logicalOrderId: orderId },
         },
       },
     },
-  };
-  const signature = razorpaySignature(services.webhookSecret ?? "mock_secret", JSON.stringify(payload));
-  const outcome = processRazorpayWebhook(services, payload, signature, services.webhookSecret ?? "mock_secret");
-  return NextResponse.json({ ...outcome, simulated: true, replay });
+  });
+
+  const signature = razorpaySignature(services.webhookSecret ?? "mock_secret", rawBody);
+  const eventId = `evt_sim_${session.externalOrderId}_${paymentId}`;
+
+  const outcome = await processRazorpayWebhookRaw(
+    services,
+    rawBody,
+    signature,
+    eventId,
+    services.webhookSecret ?? "mock_secret",
+  );
+
+  return NextResponse.json({ ...outcome, simulated: true, replay, eventId });
 }

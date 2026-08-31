@@ -85,6 +85,11 @@ export class DemoMachineResource {
     return this.processed.has(paymentIdentifier);
   }
 
+  reset(): void {
+    this.processed.clear();
+    this.cachedResource.clear();
+  }
+
   agentWallet(): string {
     return this.config.agentWallet;
   }

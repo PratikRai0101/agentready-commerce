@@ -24,6 +24,28 @@ export type MachinePlaneHooks = {
   hasProcessed(paymentIdentifier: string): boolean;
 };
 
+export type ClientVerifyClaims = {
+  orderId: string;
+  paymentId: string;
+  signature: string;
+  simulate?: { orderId?: string; amountMinor?: number; currency?: string; status?: string };
+};
+
+export type WebhookClaims = {
+  eventId: string;
+  paymentId: string;
+  orderId: string;
+  amountMinor: number;
+  currency: string;
+  status: string;
+};
+
+export type RailBindingHooks = {
+  attemptClientVerify(input: ClientVerifyClaims): Promise<{ ok: boolean; reasons: string[]; state: string }>;
+  applyWebhook(input: WebhookClaims): Promise<{ ok: boolean; reasons: string[]; state: string; deduplicated?: boolean; held?: boolean }>;
+  currentState(): Promise<string>;
+};
+
 export type PlaneHooks = {
   findMandate(customerId: string): Promise<PurchaseMandate | undefined>;
   checkPaymentPolicy(envelope: CommerceEnvelope, rail: string): Promise<{ allow: boolean; reasonCodes: string[] }>;
@@ -36,6 +58,7 @@ export type PlaneHooks = {
   countSuccessRail(envelope: CommerceEnvelope): Promise<number>;
   replayWebhook(eventId: string): Promise<{ processed: boolean; deduplicated: boolean }>;
   machine: MachinePlaneHooks;
+  railBinding?: RailBindingHooks;
 };
 
 export async function runCriticalInvariants(
@@ -257,6 +280,101 @@ export async function runCriticalInvariants(
       },
     ),
   );
+
+  if (plane.railBinding) {
+    const binding = plane.railBinding;
+    const wrongOrder = await check(
+      "gate_11",
+      "Wrong Razorpay order ID is rejected",
+      "A client verify submission whose order ID differs from the session's Razorpay order must be rejected.",
+      async () => {
+        const result = await binding.attemptClientVerify({
+          orderId: "order_WRONG",
+          paymentId: "pay_1",
+          signature: "sig",
+        });
+        return { pass: !result.ok, detail: `rejected with reasons: ${result.reasons.join("; ")}` };
+      },
+    );
+    checks.push(wrongOrder);
+
+    const wrongAmount = await check(
+      "gate_12",
+      "Wrong payment amount is rejected",
+      "A captured payment whose amount differs from the approved envelope must be rejected before PAID_VERIFIED.",
+      async () => {
+        const result = await binding.attemptClientVerify({
+          orderId: "order_binding",
+          paymentId: "pay_1",
+          signature: "sig",
+          simulate: { amountMinor: envelope.totalMinor + 100 },
+        });
+        const amountMentioned = result.reasons.some((reason) => reason.includes("amount"));
+        return { pass: !result.ok && amountMentioned, detail: `rejected with reasons: ${result.reasons.join("; ")}` };
+      },
+    );
+    checks.push(wrongAmount);
+
+    const wrongCurrency = await check(
+      "gate_13",
+      "Wrong payment currency is rejected",
+      "A captured payment in a currency other than the approved envelope must be rejected.",
+      async () => {
+        const result = await binding.attemptClientVerify({
+          orderId: "order_binding",
+          paymentId: "pay_1",
+          signature: "sig",
+          simulate: { currency: "USD" },
+        });
+        return { pass: !result.ok, detail: `rejected with reasons: ${result.reasons.join("; ")}` };
+      },
+    );
+    checks.push(wrongCurrency);
+
+    const notCaptured = await check(
+      "gate_14",
+      "Authorized-but-not-captured payments do not fulfil",
+      "A payment with status authorized (not captured) must never reach PAID_VERIFIED.",
+      async () => {
+        const result = await binding.attemptClientVerify({
+          orderId: "order_binding",
+          paymentId: "pay_1",
+          signature: "sig",
+          simulate: { status: "authorized" },
+        });
+        const statusMentioned = result.reasons.some((reason) => reason.includes("captured"));
+        return { pass: !result.ok && statusMentioned, detail: `rejected with reasons: ${result.reasons.join("; ")}` };
+      },
+    );
+    checks.push(notCaptured);
+
+    const beforeClient = await check(
+      "gate_15",
+      "Webhook arriving before client verification is reconciled safely",
+      "A valid captured webhook must settle the order first; a later client verification must not create a second success.",
+      async () => {
+        const webhook = await binding.applyWebhook({
+          eventId: "evt_before_client",
+          paymentId: "pay_wh",
+          orderId: "order_binding",
+          amountMinor: envelope.totalMinor,
+          currency: envelope.currency,
+          status: "captured",
+        });
+        const client = await binding.attemptClientVerify({
+          orderId: "order_binding",
+          paymentId: "pay_wh",
+          signature: "sig",
+        });
+        const finalState = await binding.currentState();
+        return {
+          pass: webhook.ok && client.ok && finalState === "PAID_VERIFIED" && !webhook.held,
+          detail: `webhook ok: ${webhook.ok}; client ok: ${client.ok}; final state: ${finalState}`,
+        };
+      },
+    );
+    checks.push(beforeClient);
+  }
 
   const passCount = checks.filter((check) => check.pass).length;
   return {

@@ -106,6 +106,38 @@ function passingPlane(): PlaneHooks {
   let paid = false;
   const machine = new TestMachineResource();
   const processedWebhooks = new Set<string>();
+  let bindingState = "PAYMENT_PENDING";
+  const bindingReject = (reasons: string[]) => ({ ok: false, reasons, state: (bindingState = "PAYMENT_FAILED") });
+  const railBinding: NonNullable<PlaneHooks["railBinding"]> = {
+    attemptClientVerify: async (claims) => {
+      const reasons: string[] = [];
+      if (claims.orderId !== "order_binding") reasons.push("order id mismatch");
+      if (claims.simulate?.orderId) reasons.push("fetched order_id mismatch");
+      if (claims.simulate?.amountMinor !== undefined && claims.simulate.amountMinor !== envelope.totalMinor) {
+        reasons.push(`amount ${claims.simulate.amountMinor} does not match approved envelope`);
+      }
+      if (claims.simulate?.currency && claims.simulate.currency !== envelope.currency) {
+        reasons.push(`currency ${claims.simulate.currency} mismatch`);
+      }
+      if (claims.simulate?.status && claims.simulate.status !== "captured") {
+        reasons.push(`payment status is ${claims.simulate.status}, not captured`);
+      }
+      if (reasons.length > 0) return bindingReject(reasons);
+      if (bindingState === "PAYMENT_PENDING") bindingState = "PAID_VERIFIED";
+      return { ok: true, reasons: [], state: bindingState };
+    },
+    applyWebhook: async (claims) => {
+      const reasons: string[] = [];
+      if (claims.orderId !== "order_binding") reasons.push("order id mismatch");
+      if (claims.amountMinor !== envelope.totalMinor) reasons.push(`amount ${claims.amountMinor} mismatch`);
+      if (claims.currency !== envelope.currency) reasons.push(`currency ${claims.currency} mismatch`);
+      if (claims.status !== "captured") reasons.push(`status ${claims.status}, not captured`);
+      if (reasons.length > 0) return bindingReject(reasons);
+      bindingState = "PAID_VERIFIED";
+      return { ok: true, reasons: [], state: bindingState };
+    },
+    currentState: async () => bindingState,
+  };
   return {
     findMandate: async () => mandate,
     checkPaymentPolicy: async (candidate) => {
@@ -138,14 +170,26 @@ function passingPlane(): PlaneHooks {
       accept: (header, hash) => machine.accept(header, hash),
       hasProcessed: (pid) => machine.hasProcessed(pid),
     },
+    railBinding,
   };
 }
 
 describe("critical invariants", () => {
-  it("passes all ten gates with a compliant plane", async () => {
+  it("passes all fifteen gates with a compliant plane", async () => {
     const report = await runCriticalInvariants(passingPlane(), envelope, mandate);
     expect(report.failCount).toBe(0);
-    expect(report.passCount).toBe(10);
+    expect(report.passCount).toBe(15);
+  });
+
+  it("fails gate_12 when the plane does not enforce the payment amount", async () => {
+    const plane = passingPlane();
+    plane.railBinding!.attemptClientVerify = async (claims) =>
+      claims.orderId !== "order_binding"
+        ? { ok: false, reasons: ["order id mismatch"], state: "PAYMENT_FAILED" }
+        : { ok: true, reasons: [], state: "PAID_VERIFIED" };
+    const report = await runCriticalInvariants(plane, envelope, mandate);
+    const gate = report.checks.find((check) => check.id === "gate_12")!;
+    expect(gate.pass).toBe(false);
   });
 
   it("fails gate_03 when the plane allows a tampered cart", async () => {
