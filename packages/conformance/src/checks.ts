@@ -1,5 +1,6 @@
 import { checkEnvelopeForPayment, envelopeDigest, requiresReapproval } from "@agentready/domain";
 import type { CommerceEnvelope, PurchaseMandate } from "@agentready/domain";
+import { parsePaymentRequired, encodeHeader, type SettlementResponse } from "@agentready/payments";
 
 export type ConformanceCheck = {
   id: string;
@@ -17,6 +18,12 @@ export type ConformanceReport = {
   failCount: number;
 };
 
+export type MachinePlaneHooks = {
+  quote(envelopeHash: string): string;
+  accept(paymentSignatureHeader: string, envelopeHash: string): { ok: boolean; settlement?: SettlementResponse; error?: string };
+  hasProcessed(paymentIdentifier: string): boolean;
+};
+
 export type PlaneHooks = {
   findMandate(customerId: string): Promise<PurchaseMandate | undefined>;
   checkPaymentPolicy(envelope: CommerceEnvelope, rail: string): Promise<{ allow: boolean; reasonCodes: string[] }>;
@@ -27,6 +34,8 @@ export type PlaneHooks = {
   compensate(envelope: CommerceEnvelope): Promise<{ ok: boolean; refundId?: string; error?: string }>;
   isAlreadyPaid(envelope: CommerceEnvelope): Promise<boolean>;
   countSuccessRail(envelope: CommerceEnvelope): Promise<number>;
+  replayWebhook(eventId: string): Promise<{ processed: boolean; deduplicated: boolean }>;
+  machine: MachinePlaneHooks;
 };
 
 export async function runCriticalInvariants(
@@ -159,6 +168,96 @@ export async function runCriticalInvariants(
     ),
   );
 
+  checks.push(
+    await check(
+      "gate_07",
+      "x402 underpayment or wrong recipient is rejected",
+      "The machine resource must reject settlements that underpay or target the wrong payee.",
+      async () => {
+        const requiredHeader = plane.machine.quote(envelopeDigest(envelope));
+        const required = parsePaymentRequired(requiredHeader);
+        const option = required.options[0]!;
+        const memo = option.extra?.memo;
+        const underpay = await plane.machine.accept(
+          buildSignature(option.network, "pid_underpay", memo, "0.000001", option.payee),
+          envelopeDigest(envelope),
+        );
+        const wrongRecipient = await plane.machine.accept(
+          buildSignature(option.network, "pid_wrong_recipient", memo, option.amount, "wallet_not_the_payee"),
+          envelopeDigest(envelope),
+        );
+        const proper = await plane.machine.accept(
+          buildSignature(option.network, "pid_proper", memo, option.amount, option.payee),
+          envelopeDigest(envelope),
+        );
+        return {
+          pass: !underpay.ok && !wrongRecipient.ok && proper.ok,
+          detail: `underpayment rejected: ${!underpay.ok}; wrong recipient rejected: ${!wrongRecipient.ok}; correct payment accepted: ${proper.ok}`,
+        };
+      },
+    ),
+  );
+
+  checks.push(
+    await check(
+      "gate_08",
+      "x402 replay with the same payment identifier causes no repeat spend",
+      "Retrying the same payment identifier must return the cached settlement, not a new charge.",
+      async () => {
+        const requiredHeader = plane.machine.quote(envelopeDigest(envelope));
+        const option = parsePaymentRequired(requiredHeader).options[0]!;
+        const first = await plane.machine.accept(
+          buildSignature(option.network, "pid_replay", option.extra?.memo, option.amount, option.payee),
+          envelopeDigest(envelope),
+        );
+        const second = await plane.machine.accept(
+          buildSignature(option.network, "pid_replay", option.extra?.memo, option.amount, option.payee),
+          envelopeDigest(envelope),
+        );
+        const sameSettlement = first.settlement?.transactionHash === second.settlement?.transactionHash;
+        return {
+          pass: first.ok && second.ok && sameSettlement && plane.machine.hasProcessed("pid_replay"),
+          detail: `same transactionHash on replay: ${sameSettlement}`,
+        };
+      },
+    ),
+  );
+
+  checks.push(
+    await check(
+      "gate_09",
+      "Expired envelopes cannot be paid",
+      "An envelope past its expiry must be blocked before payment initiation.",
+      async () => {
+        const expired = { ...envelope, expiresAt: "2000-01-01T00:00:00.000Z" };
+        const verdict = checkEnvelopeForPayment({
+          envelope: expired,
+          mandate,
+          expectedDigest: envelopeDigest(expired),
+          approved: true,
+          allowAutoApprove: false,
+        });
+        return { pass: !verdict.allow, detail: `Blocked with ${verdict.reasonCodes.join(", ")}` };
+      },
+    ),
+  );
+
+  checks.push(
+    await check(
+      "gate_10",
+      "Duplicate webhooks create one logical transition",
+      "Replaying the same webhook event must be deduplicated and produce no second state transition.",
+      async () => {
+        const first = await plane.replayWebhook("evt_dup_1");
+        const second = await plane.replayWebhook("evt_dup_1");
+        return {
+          pass: first.processed && second.deduplicated,
+          detail: `first: processed=${first.processed}; second: deduplicated=${second.deduplicated}`,
+        };
+      },
+    ),
+  );
+
   const passCount = checks.filter((check) => check.pass).length;
   return {
     suite: "critical-invariants",
@@ -198,4 +297,25 @@ function buildTampered(envelope: CommerceEnvelope): CommerceEnvelope {
     ...structuredClone(envelope),
     items: [{ ...structuredClone(first), quantity: first.quantity + 1 }],
   };
+}
+
+function buildSignature(
+  network: string,
+  paymentIdentifier: string,
+  memo: string | undefined,
+  amount: string,
+  payee: string,
+): string {
+  return encodeHeader({
+    scheme: "exact",
+    network,
+    paymentIdentifier,
+    paymentPayload: {
+      transaction: `tx_signed_${paymentIdentifier}`,
+      payer: "wallet_agent_demo",
+      amount,
+      payee,
+      memo,
+    },
+  });
 }

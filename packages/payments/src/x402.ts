@@ -25,6 +25,7 @@ export type PaymentSignaturePayload = {
     transaction: string;
     payer: string;
     amount: string;
+    payee?: string;
     memo?: string;
   };
 };

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { runCriticalInvariants, type PlaneHooks } from "@agentready/conformance";
 import { envelopeDigest } from "@agentready/domain";
+import { parsePaymentResponse } from "@agentready/payments";
 import { getServices } from "@/lib/services";
+import { DEFAULT_MACHINE_SPEND, DemoMachineResource } from "@/lib/machine";
 
 export const runtime = "nodejs";
 
@@ -21,6 +23,7 @@ export async function GET() {
     const quote = await services.buildQuote(orderId, "p_streak_4");
     await services.approve(orderId, quote.digest);
     await services.initiatePayment(orderId, "razorpay_checkout");
+    const machine = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
 
     const plane: PlaneHooks = {
       findMandate: async () => services.getMandate(session.customerId),
@@ -61,6 +64,24 @@ export async function GET() {
       countSuccessRail: async () => {
         const current = services.getSession(orderId);
         return current && ["PAID_VERIFIED", "FULFILMENT_PENDING", "FULFILLED", "REFUNDED"].includes(current.state) ? 1 : 0;
+      },
+      replayWebhook: async (eventId) => {
+        if (services.isWebhookProcessed(eventId)) {
+          return { processed: false, deduplicated: true };
+        }
+        services.markWebhookProcessed(eventId);
+        return { processed: true, deduplicated: false };
+      },
+      machine: {
+        quote: (hash) => machine.quote(hash),
+        accept: (header, hash) => {
+          const response = machine.accept(header, hash);
+          if (response.status !== 200) {
+            return { ok: false, error: JSON.stringify(response.body) };
+          }
+          return { ok: true, settlement: parsePaymentResponse(response.headers["PAYMENT-RESPONSE"]!) };
+        },
+        hasProcessed: (pid) => machine.hasProcessed(pid),
       },
     };
 

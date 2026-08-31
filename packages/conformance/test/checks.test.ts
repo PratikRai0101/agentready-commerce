@@ -2,6 +2,66 @@ import { describe, expect, it } from "vitest";
 import { runCriticalInvariants, type PlaneHooks } from "../src";
 import { envelopeDigest } from "@agentready/domain";
 import type { CommerceEnvelope, PurchaseMandate } from "@agentready/domain";
+import { buildPaymentRequired, type SettlementResponse } from "@agentready/payments";
+
+class TestMachineResource {
+  private processed = new Map<string, SettlementResponse>();
+  quote(envelopeHash: string): string {
+    return buildPaymentRequired("test-resource", [
+      {
+        scheme: "exact",
+        network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        asset: "USDC",
+        amount: "0.010000",
+        payee: "payee_test",
+        timeout: new Date(Date.now() + 60_000).toISOString(),
+        paymentIdentifier: { required: true },
+        extra: { memo: `agentcart:v1:${envelopeHash}` },
+      },
+    ]);
+  }
+  accept(header: string, envelopeHash: string) {
+    let payload: {
+      scheme: string;
+      network: string;
+      paymentIdentifier: string;
+      paymentPayload: { amount: string; payee?: string; memo?: string };
+    };
+    try {
+      payload = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
+    } catch {
+      return { ok: false, error: "malformed" };
+    }
+    const option = JSON.parse(Buffer.from(this.quote(envelopeHash), "base64url").toString("utf8")).options[0] as {
+      network: string;
+      amount: string;
+      payee: string;
+      extra?: { memo?: string };
+    };
+    if (payload.network !== option.network) return { ok: false, error: "wrong network" };
+    if (Number(payload.paymentPayload.amount) < Number(option.amount)) return { ok: false, error: "underpayment" };
+    if (payload.paymentPayload.payee && payload.paymentPayload.payee !== option.payee) {
+      return { ok: false, error: "wrong recipient" };
+    }
+    if (payload.paymentPayload.memo !== option.extra?.memo) return { ok: false, error: "memo mismatch" };
+    if (this.processed.has(payload.paymentIdentifier)) {
+      return { ok: true, settlement: this.processed.get(payload.paymentIdentifier)! };
+    }
+    const settlement: SettlementResponse = {
+      success: true,
+      network: option.network,
+      payer: "wallet_agent_demo",
+      amount: option.amount,
+      transactionHash: `tx_${payload.paymentIdentifier}`,
+      paymentIdentifier: payload.paymentIdentifier,
+    };
+    this.processed.set(payload.paymentIdentifier, settlement);
+    return { ok: true, settlement };
+  }
+  hasProcessed(paymentIdentifier: string): boolean {
+    return this.processed.has(paymentIdentifier);
+  }
+}
 
 const envelope: CommerceEnvelope = {
   version: 1,
@@ -44,6 +104,8 @@ const mandate: PurchaseMandate = {
 
 function passingPlane(): PlaneHooks {
   let paid = false;
+  const machine = new TestMachineResource();
+  const processedWebhooks = new Set<string>();
   return {
     findMandate: async () => mandate,
     checkPaymentPolicy: async (candidate) => {
@@ -66,14 +128,24 @@ function passingPlane(): PlaneHooks {
     compensate: async () => ({ ok: true, refundId: "rfnd_1" }),
     isAlreadyPaid: async () => paid,
     countSuccessRail: async () => (paid ? 1 : 0),
+    replayWebhook: async (eventId) => {
+      if (processedWebhooks.has(eventId)) return { processed: false, deduplicated: true };
+      processedWebhooks.add(eventId);
+      return { processed: true, deduplicated: false };
+    },
+    machine: {
+      quote: (hash) => machine.quote(hash),
+      accept: (header, hash) => machine.accept(header, hash),
+      hasProcessed: (pid) => machine.hasProcessed(pid),
+    },
   };
 }
 
 describe("critical invariants", () => {
-  it("passes all six gates with a compliant plane", async () => {
+  it("passes all ten gates with a compliant plane", async () => {
     const report = await runCriticalInvariants(passingPlane(), envelope, mandate);
     expect(report.failCount).toBe(0);
-    expect(report.passCount).toBe(6);
+    expect(report.passCount).toBe(10);
   });
 
   it("fails gate_03 when the plane allows a tampered cart", async () => {

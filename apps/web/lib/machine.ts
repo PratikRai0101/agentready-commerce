@@ -112,6 +112,9 @@ export class DemoMachineResource {
     if (Number(payload.paymentPayload?.amount) < this.config.amountMinor / 1_000_000) {
       errors.push("underpayment");
     }
+    if (payload.paymentPayload?.payee && payload.paymentPayload.payee !== this.config.payeeWallet) {
+      errors.push("wrong recipient");
+    }
     if (!isMemoValid(payload.paymentPayload?.memo, memoForEnvelope(envelopeHash))) {
       errors.push("memo mismatch");
     }
@@ -189,6 +192,7 @@ export function runMachineSpend(
       transaction: `tx_signed_mock_${paymentIdentifier}`,
       payer: resource.agentWallet(),
       amount: option.amount,
+      payee: option.payee,
       memo: option.extra?.memo,
     },
   } satisfies PaymentSignaturePayload);
