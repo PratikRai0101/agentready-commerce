@@ -14,6 +14,14 @@ type QuoteResult = {
   approvalEventId?: string;
 };
 
+type MachineSpendInfo = {
+  mock: boolean;
+  paymentIdentifier: string;
+  txHash: string;
+  network: string;
+  amount: string;
+};
+
 type ChatMessage = { role: "user" | "agent"; text: string };
 
 const SUGGESTED = "I need black shoes under ₹5,000.";
@@ -25,6 +33,8 @@ export default function HomePage() {
   const [questions, setQuestions] = useState<string[]>([]);
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
   const [matches, setMatches] = useState<ProductMatch[] | null>(null);
+  const [fitScores, setFitScores] = useState<Record<string, { fitScore: number; note: string }> | null>(null);
+  const [machineSpend, setMachineSpend] = useState<MachineSpendInfo | null>(null);
   const [quote, setQuote] = useState<QuoteResult | null>(null);
   const [rails, setRails] = useState<{ rail: string; isMock: boolean }[]>([]);
   const [timeline, setTimeline] = useState<AuditEvent[]>([]);
@@ -59,6 +69,8 @@ export default function HomePage() {
     setQuestions([]);
     setQuickReplies([]);
     setMatches(null);
+    setFitScores(null);
+    setMachineSpend(null);
     setQuote(null);
     setTimeline([]);
     setConformance(null);
@@ -100,6 +112,8 @@ export default function HomePage() {
         } else if (data.kind === "shortlist") {
           pushAgent(data.message);
           setMatches(data.matches);
+          setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
+          setMachineSpend(data.machineSpend ?? null);
         } else if (data.kind === "error") {
           pushAgent(data.message);
         }
@@ -394,32 +408,46 @@ export default function HomePage() {
         {matches && (
           <div className="panel">
             <h2>Ranked shortlist</h2>
+            {machineSpend && (
+              <div className="hint" style={{ color: "var(--warn)", marginBottom: 8 }}>
+                Machine tool spend: {machineSpend.amount} USDC via x402 v2 · {machineSpend.network} ·{" "}
+                <span className="mono">{machineSpend.txHash.slice(0, 16)}…</span> · {machineSpend.mock ? "MOCK demo settlement" : "live"} — this is agent spend for the fit-scoring API, separate from your shoe purchase.
+              </div>
+            )}
             <div className="cards">
-              {matches.map((match) => (
-                <div key={match.product.productId} className="card" onClick={() => chooseProduct(match.product.productId)}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span className="score">score {match.score}</span>
-                    <span className="tag">{match.product.brand}</span>
-                  </div>
-                  <h3>{match.product.name}</h3>
-                  <div className="price">₹{(match.product.priceMinor / 100).toFixed(2)}</div>
-                  <div className="tag">
-                    {match.product.useCase} · {match.product.fit} fit · {match.product.cushioning} cushioning · up to{" "}
-                    {match.product.typicalDistanceKm}K
-                  </div>
-                  {match.reasons.map((reason) => (
-                    <div key={reason} className="good">
-                      + {reason}
+              {matches.map((match) => {
+                const fitScore = fitScores?.[match.product.productId];
+                return (
+                  <div key={match.product.productId} className="card" onClick={() => chooseProduct(match.product.productId)}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span className="score">score {match.score}</span>
+                      <span className="tag">{match.product.brand}</span>
                     </div>
-                  ))}
-                  {match.compromises.map((compromise) => (
-                    <div key={compromise} className="comp">
-                      − {compromise}
+                    <h3>{match.product.name}</h3>
+                    <div className="price">₹{(match.product.priceMinor / 100).toFixed(2)}</div>
+                    <div className="tag">
+                      {match.product.useCase} · {match.product.fit} fit · {match.product.cushioning} cushioning · up to{" "}
+                      {match.product.typicalDistanceKm}K
                     </div>
-                  ))}
-                  <div className="hint">Click to quote</div>
-                </div>
-              ))}
+                    {fitScore && (
+                      <div className="score">
+                        fit-score {fitScore.fitScore}/100 — {fitScore.note}
+                      </div>
+                    )}
+                    {match.reasons.map((reason) => (
+                      <div key={reason} className="good">
+                        + {reason}
+                      </div>
+                    ))}
+                    {match.compromises.map((compromise) => (
+                      <div key={compromise} className="comp">
+                        − {compromise}
+                      </div>
+                    ))}
+                    <div className="hint">Click to quote</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

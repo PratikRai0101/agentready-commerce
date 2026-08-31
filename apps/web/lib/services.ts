@@ -23,6 +23,7 @@ import {
 } from "@agentready/domain";
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
 import { intentDigest, mergeIntents, parseIntentMessage, type ParsedIntent } from "./intent";
+import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 
 export type Session = {
   logicalOrderId: string;
@@ -37,6 +38,7 @@ export type Session = {
   externalPaymentId?: string;
   verification?: VerificationResult;
   compensation?: { refundId?: string; reason?: string; ok: boolean };
+  machineSpend?: { paymentIdentifier: string; settlementHash: string; fitScores: FitScore[] };
 };
 
 export type EnvelopeRecord = {
@@ -48,7 +50,7 @@ export type EnvelopeRecord = {
 
 export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
-  | { kind: "shortlist"; message: string; matches: ProductMatch[]; state: OrderState }
+  | { kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState }
   | { kind: "error"; message: string; state: OrderState };
 
 export type AppServices = {
@@ -116,6 +118,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const mandates = new Map<string, PurchaseMandate>();
   const webhookDedup = new Map<string, string>();
   const signingSecret = env.ENVELOPE_SIGNING_SECRET ?? "dev-secret-change-me";
+  const machineResource = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
 
   const services: AppServices = {
     registry,
@@ -208,7 +211,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         }
 
         setState(session, "QUOTED");
-        const message = composeShortlist(session, ranking);
+        const machineSpend = !session.machineSpend && session.intent.fit
+          ? runFitScoreSpend(session, machineResource, audit, orderId)
+          : undefined;
+        const message = composeShortlist(session, ranking, machineSpend);
         void audit.log({
           logicalOrderId: orderId,
           type: "intent.shortlist_ranked",
@@ -216,7 +222,22 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Ranked ${ranking.matches.length} products for ${intentDigest(session.intent)}`,
           inputDigest: intentDigest(session.intent),
         });
-        return { kind: "shortlist", message, matches: ranking.matches, state: session.state };
+        return {
+          kind: "shortlist",
+          message,
+          matches: ranking.matches,
+          fitScores: session.machineSpend?.fitScores,
+          machineSpend: machineSpend
+            ? {
+                mock: machineSpend.mock,
+                paymentIdentifier: machineSpend.paymentIdentifier,
+                txHash: machineSpend.txHash,
+                network: machineSpend.network,
+                amount: machineSpend.amount,
+              }
+            : undefined,
+          state: session.state,
+        };
       }
 
       return {
@@ -662,6 +683,55 @@ function setState(session: Session, next: OrderState): void {
   session.state = next;
 }
 
+function runFitScoreSpend(
+  session: Session,
+  resource: DemoMachineResource,
+  audit: ReturnType<typeof createAuditLedger>,
+  orderId: string,
+): { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string } | undefined {
+  const envelopeHash = intentDigest(session.intent);
+  const paymentIdentifier = newId("pid");
+  const outcome = runMachineSpend(resource, envelopeHash, paymentIdentifier);
+  if (!outcome.ok || !outcome.settlement || !outcome.resource) {
+    void audit.log({
+      logicalOrderId: orderId,
+      type: "machine.spend_failed",
+      actor: "agent",
+      summary: `Premium fit-score resource rejected payment: ${outcome.error ?? "unknown"}`,
+      decision: "review",
+      reasonCodes: ["x402_payment_rejected"],
+    });
+    return undefined;
+  }
+  session.machineSpend = {
+    paymentIdentifier,
+    settlementHash: outcome.settlement.transactionHash ?? "",
+    fitScores: outcome.resource.scores,
+  };
+  void audit.log({
+    logicalOrderId: orderId,
+    type: "machine.paid_resource",
+    actor: "agent",
+    summary: `Paid ${outcome.resource.resourceName} (${outcome.settlement.amount} USDC) via x402 v2 on Solana Devnet — MOCK demo settlement`,
+    externalReferences: {
+      network: outcome.settlement.network,
+      paymentIdentifier,
+      txHash: outcome.settlement.transactionHash ?? "",
+      payee: DEFAULT_MACHINE_SPEND.payeeWallet,
+      mock: "true",
+    },
+    decision: "allow",
+    reasonCodes: ["x402_mock_settlement_verified", "machine_tool_spend"],
+  });
+  return {
+    mock: true,
+    paymentIdentifier,
+    txHash: outcome.settlement.transactionHash ?? "",
+    network: outcome.settlement.network,
+    amount: outcome.settlement.amount,
+  };
+}
+
 function SHA256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -677,8 +747,11 @@ function composeClarification(session: Session, missingNames: string[]): string 
   return `${preamble}Before I shortlist, I need ${missingNames.length} details: ${missingNames.join(", ")}.`;
 }
 
-function composeShortlist(session: Session, ranking: RankingResult): string {
+function composeShortlist(session: Session, ranking: RankingResult, machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }): string {
   const best = ranking.matches[0];
   if (!best) return "No products satisfy your constraints with current stock.";
-  return `Here are your top ${ranking.matches.length} matches. Best under the stated evidence: ${best.product.name} (₹${(best.product.priceMinor / 100).toFixed(2)}, score ${best.score}).`;
+  const spendNote = machineSpend
+    ? ` I spent ${machineSpend.amount} USDC via x402 v2 on Solana Devnet (${machineSpend.mock ? "MOCK demo settlement" : "live settlement"}, tx ${machineSpend.txHash.slice(0, 16)}…) on a premium wide-fit scoring pass — the fit scores below are grounded in that paid resource.`
+    : "";
+  return `Here are your top ${ranking.matches.length} matches. Best under the stated evidence: ${best.product.name} (₹${(best.product.priceMinor / 100).toFixed(2)}, score ${best.score}).${spendNote}`;
 }

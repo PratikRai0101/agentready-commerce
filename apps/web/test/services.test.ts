@@ -202,6 +202,47 @@ describe("webhook deduplication", () => {
   });
 });
 
+describe("x402 machine spend", () => {
+  it("spends on the fit-score resource once and audits the event", async () => {
+    const services = getServices(env, { forceMock: true });
+    const session = services.createSession();
+    const orderId = session.logicalOrderId;
+    await services.respond(orderId, DEMO_MESSAGE);
+    await services.respond(orderId, "UK 9");
+    const result = await services.respond(orderId, "Road running up to 10K, wide fit");
+    expect(result.kind).toBe("shortlist");
+    if (result.kind !== "shortlist") throw new Error("unreachable");
+    expect(result.machineSpend).toBeDefined();
+    expect(result.machineSpend?.mock).toBe(true);
+    expect(result.fitScores).toHaveLength(6);
+
+    const events = await services.timeline(orderId);
+    const spend = events.find((e) => e.type === "machine.paid_resource");
+    expect(spend).toBeDefined();
+    expect(spend?.decision).toBe("allow");
+    expect(spend?.externalReferences?.network).toContain("solana:");
+    expect(spend?.externalReferences?.mock).toBe("true");
+
+    const second = await services.respond(orderId, "Road running up to 10K, wide fit");
+    if (second.kind !== "shortlist") throw new Error("unreachable");
+    expect(second.machineSpend).toBeUndefined();
+    const spendEvents = (await services.timeline(orderId)).filter((e) => e.type === "machine.paid_resource");
+    expect(spendEvents).toHaveLength(1);
+  });
+
+  it("does not spend when no fit preference is stated", async () => {
+    const services = getServices(env, { forceMock: true });
+    const session = services.createSession();
+    const orderId = session.logicalOrderId;
+    await services.respond(orderId, DEMO_MESSAGE);
+    await services.respond(orderId, "UK 9");
+    const result = await services.respond(orderId, "Road running up to 10K");
+    expect(result.kind).toBe("shortlist");
+    if (result.kind !== "shortlist") throw new Error("unreachable");
+    expect(result.machineSpend).toBeUndefined();
+  });
+});
+
 function razorpaySign(secret: string, payload: string): string {
   return razorpaySignature(secret, payload);
 }
