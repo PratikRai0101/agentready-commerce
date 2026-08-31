@@ -22,7 +22,7 @@ Prerequisites: Node 20+, pnpm.
 
 ```bash
 pnpm install
-cp .env.example .env        # optional; everything runs in mock mode without it
+cp apps/web/.env.example apps/web/.env.local   # optional; everything runs in mock mode without it
 pnpm dev                    # http://localhost:3000
 ```
 
@@ -31,7 +31,14 @@ pnpm test                   # 106 tests: unit, adversarial, integration, conform
 pnpm typecheck
 ```
 
-To use real Razorpay test mode, add `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` to `.env` (dashboard.razorpay.com → Settings → API Keys). Without them, the app uses the clearly-labelled `MockRazorpayAdapter` (same signature scheme, same code path).
+To use real Razorpay **Test Mode**, add `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` (test keys starting
+with `rzp_test_`) to `apps/web/.env.local` (dashboard.razorpay.com → Settings → API Keys). The
+storefront header then shows a "Razorpay TEST MODE" badge. Without credentials, the app uses the
+clearly-labelled `MockRazorpayAdapter` (same signature scheme, same code path).
+
+`.env.local` and all `*.env.*.local` files are gitignored — credentials never reach the repository.
+The web app reads environment files from `apps/web/` (Next.js convention); there is no root `.env`
+loading.
 
 ## Repo layout
 

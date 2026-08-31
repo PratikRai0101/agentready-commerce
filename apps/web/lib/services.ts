@@ -87,6 +87,7 @@ export type AppServices = {
   razorpayKeySecret: string;
   webhookSecret: string | undefined;
   isMock: boolean;
+  razorpayMode: "mock" | "test" | "live";
   llm: LlmProvider;
 };
 
@@ -122,6 +123,12 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   });
   const webhookSecret =
     env.RAZORPAY_WEBHOOK_SECRET ?? (registry.isMock("razorpay_checkout") ? "mock_secret" : undefined);
+  const isMock = registry.isMock("razorpay_checkout");
+  const razorpayMode: "mock" | "test" | "live" = isMock
+    ? "mock"
+    : (env.RAZORPAY_KEY_ID ?? "").startsWith("rzp_test_")
+      ? "test"
+      : "live";
   const store = new MemoryAuditStore();
   const audit = createAuditLedger(store);
   const sessions = new Map<string, Session>();
@@ -137,7 +144,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
     audit,
     razorpayKeySecret,
     webhookSecret,
-    isMock: registry.isMock("razorpay_checkout"),
+    isMock,
+    razorpayMode,
     llm,
 
     createSession() {
@@ -429,6 +437,15 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           reasonCodes: verdict.reasonCodes,
         });
         return { ok: false, state: session.state, error: `Policy blocked payment: ${verdict.reasonCodes.join(", ")}`, reasonCodes: verdict.reasonCodes };
+      }
+
+      if (record.envelope.totalMinor < 100) {
+        return {
+          ok: false,
+          state: session.state,
+          error: "Order amount is below Razorpay's 100 paise minimum",
+          reasonCodes: ["amount_below_minimum"],
+        };
       }
 
       if (session.externalOrderId) {

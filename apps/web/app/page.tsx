@@ -194,9 +194,13 @@ export default function HomePage() {
         pushAgent("Razorpay order created. Complete the test payment to capture.");
       } else {
         pushAgent("Opening Razorpay Checkout…");
-        openRazorpayCheckout(data.attempt?.checkoutPayload, async (response) => {
-          await verifyPayment(response.razorpay_order_id, response.razorpay_payment_id, response.razorpay_signature);
-        });
+        openRazorpayCheckout(
+          data.attempt?.checkoutPayload,
+          async (response) => {
+            await verifyPayment(response.razorpay_order_id, response.razorpay_payment_id, response.razorpay_signature);
+          },
+          (message) => pushAgent(message),
+        );
       }
     }
     void refreshTimeline(orderId);
@@ -394,8 +398,8 @@ export default function HomePage() {
           <div className="sub">RunVista Sports — merchant-specific agentic storefront</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span className={`badge ${isMock ? "mock" : "live"}`}>
-            Razorpay {isMock ? "MOCK" : "live"}
+          <span className={`badge ${razorpayBadgeTone(indicators.razorpay)}`}>
+            Razorpay {razorpayBadgeLabel(indicators.razorpay)}
           </span>
           <span className={`badge ${indicators.x402 === "live" ? "live" : "mock"}`}>
             x402 {indicators.x402 === "live" ? "live" : "MOCK"}
@@ -710,19 +714,48 @@ function stateTone(state: string): string {
 function openRazorpayCheckout(
   payload: Record<string, unknown> | undefined,
   onSuccess: (response: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => void,
+  onCancel: (message: string) => void,
 ) {
-  if (!payload) return;
+  if (!payload) {
+    onCancel("Checkout could not be opened: no payment payload from the server.");
+    return;
+  }
   const script = document.createElement("script");
   script.src = "https://checkout.razorpay.com/v1/checkout.js";
   script.onload = () => {
-    const razorpay = (window as unknown as { Razorpay: new (options: Record<string, unknown>) => { open: () => void } }).Razorpay;
+    const razorpay = (window as unknown as {
+      Razorpay: new (options: Record<string, unknown>) => { open: () => void; on: (event: string, cb: (response: { error?: { description?: string }; code?: string }) => void) => void };
+    }).Razorpay;
     const instance = new razorpay({
       ...payload,
       handler: (response: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
         onSuccess(response);
       },
+      modal: {
+        ondismiss: () => {
+          onCancel("Checkout closed without completing payment. The order remains PAYMENT_PENDING.");
+        },
+      },
+    });
+    instance.on("payment.failed", (response) => {
+      onCancel(`Payment failed: ${response.error?.description ?? response.code ?? "unknown reason"}. No charge was captured.`);
     });
     instance.open();
   };
+  script.onerror = () => {
+    onCancel("Could not load the Razorpay Checkout script. Check your network connection.");
+  };
   document.body.appendChild(script);
+}
+
+function razorpayBadgeLabel(mode: string): string {
+  if (mode === "test") return "TEST MODE";
+  if (mode === "live") return "live";
+  return "MOCK";
+}
+
+function razorpayBadgeTone(mode: string): string {
+  if (mode === "test") return "test";
+  if (mode === "live") return "live";
+  return "mock";
 }

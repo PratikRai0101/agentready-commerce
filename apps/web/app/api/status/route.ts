@@ -9,6 +9,11 @@ export async function GET() {
   return NextResponse.json({
     orderId: session.logicalOrderId,
     rails: services.registry.all().map((adapter) => ({ rail: adapter.rail, isMock: adapter.isMock })),
+    indicators: {
+      razorpay: services.razorpayMode,
+      x402: "mock",
+      llm: services.llm.enabled ? services.llm.name : "disabled",
+    },
     envelopeSigning: services.registry.isMock("razorpay_checkout") ? "mock" : "configured",
   });
 }

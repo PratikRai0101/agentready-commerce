@@ -11,6 +11,13 @@ export async function POST(request: Request) {
   const services = getServices();
   const result = await services.initiatePayment(orderId, rail ?? "razorpay_checkout");
   if (!result.ok) {
+    const errorMessage = result.error ?? "";
+    if (errorMessage.includes("authentication failed")) {
+      return NextResponse.json(result, { status: 401 });
+    }
+    if (errorMessage.includes("Razorpay API") || errorMessage.includes("unreachable")) {
+      return NextResponse.json(result, { status: 502 });
+    }
     return NextResponse.json(result, { status: 409 });
   }
   return NextResponse.json(result);

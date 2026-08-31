@@ -12,7 +12,7 @@ export async function POST() {
     customerId: session.customerId,
     rails: services.registry.all().map((adapter) => ({ rail: adapter.rail, isMock: adapter.isMock })),
     indicators: {
-      razorpay: services.isMock ? "mock" : "live",
+      razorpay: services.razorpayMode,
       x402: "mock",
       llm: services.llm.enabled ? services.llm.name : "disabled",
     },

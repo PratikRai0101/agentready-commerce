@@ -22,7 +22,7 @@ tests. Commit history in this repo follows the same phases.
 
 | Phase | Status | Where |
 |---|---|---|
-| 0 — decisions/access | Partially (credentials + devnet wallet pending) | `.env.example`, `docs/open-questions.md` |
+| 0 — decisions/access | Partially (Test Mode credentials present locally; devnet wallet pending) | `apps/web/.env.example`, `apps/web/.env.local` (gitignored), `docs/open-questions.md` |
 | 1 — vertical skeleton | Done | catalog + intent + ranking + storefront UI |
 | 2 — envelope + policy | Done | `packages/domain`, `approve`/`tamper` routes |
 | 3 — Razorpay end to end | Done (mock mode; live needs credentials) | `packages/payments`, `pay/*`, `webhook/*` routes |
@@ -71,7 +71,8 @@ tests. Commit history in this repo follows the same phases.
 ## Honesty boundaries
 
 - Mock adapters are explicit: `MockRazorpayAdapter.isMock`, `mock: "true"` on x402 audit events, UI badges.
-- No live Razorpay/x402 claims until real credentials and a Devnet settlement exist (`.env.example`, README).
+- No live Razorpay/x402 claims until a real Test Mode transaction and a Devnet settlement exist (`apps/web/.env.example`, README).
+- Test Mode credentials live only in gitignored `apps/web/.env.local`; the UI badge shows "TEST MODE", never "live", for `rzp_test_` keys.
 - Conformance suite verifies declared invariants only — no third-party certification claims.
 
 ## Definition-of-done status
@@ -80,7 +81,7 @@ tests. Commit history in this repo follows the same phases.
 |---|---|
 | Public repository | **Pending** — repo intentionally private until the owner decides |
 | Reproducible local setup | Done (`pnpm install && pnpm dev`) |
-| `.env.example` with no secrets | Done |
+| `.env.example` with no secrets | Done (`apps/web/.env.example`; local values only in gitignored `.env.local`) |
 | Architecture diagram | `docs/architecture.md` + README |
 | Meaningful tests and final results | 106 tests, 15/15 conformance gates |
 | Razorpay test-mode proof | **Pending** — needs `RAZORPAY_KEY_ID`/`SECRET` |

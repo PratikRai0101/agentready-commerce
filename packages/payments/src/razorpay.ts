@@ -19,6 +19,20 @@ export type RazorpayConfig = {
 
 const API_BASE = "https://api.razorpay.com/v1";
 
+export class RazorpayAuthenticationError extends Error {
+  constructor() {
+    super("Razorpay authentication failed (invalid Key ID or Key Secret)");
+    this.name = "RazorpayAuthenticationError";
+  }
+}
+
+export class RazorpayApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "RazorpayApiError";
+  }
+}
+
 export function razorpaySignature(keySecret: string, payload: string): string {
   return createHmac("sha256", keySecret).update(payload, "utf8").digest("hex");
 }
@@ -59,18 +73,28 @@ export class RazorpayAdapter implements PaymentAdapter {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.config.apiBase ?? API_BASE}${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: this.authHeader(),
-        ...(init?.headers ?? {}),
-      },
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.config.apiBase ?? API_BASE}${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: this.authHeader(),
+          ...(init?.headers ?? {}),
+        },
+      });
+    } catch (error) {
+      throw new Error(
+        `Razorpay API unreachable (${error instanceof Error ? error.name : "network error"}); check network or credentials`,
+      );
+    }
     const body = (await response.json()) as T & { error?: { description?: string; code?: string } };
     if (!response.ok) {
+      if (response.status === 401) {
+        throw new RazorpayAuthenticationError();
+      }
       const description = body.error?.description ?? `HTTP ${response.status}`;
-      throw new Error(`Razorpay ${init?.method ?? "GET"} ${path} failed: ${description}`);
+      throw new RazorpayApiError(`Razorpay ${init?.method ?? "GET"} ${path} failed: ${description}`, response.status);
     }
     return body;
   }
