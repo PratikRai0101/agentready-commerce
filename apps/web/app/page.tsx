@@ -5,6 +5,8 @@ import type { ProductMatch } from "@agentready/catalog";
 import type { AuditEvent } from "@agentready/audit";
 import type { ConformanceReport } from "@agentready/conformance";
 import type { CommerceEnvelope } from "@agentready/domain";
+import { RunVistaBrand } from "./components/RunVistaBrand";
+import { ProductCard } from "./components/ProductCard";
 
 type QuoteResult = {
   envelope: CommerceEnvelope;
@@ -24,7 +26,19 @@ type MachineSpendInfo = {
 
 type ChatMessage = { role: "user" | "agent"; text: string };
 
-const SUGGESTED = "I need black shoes under ₹5,000.";
+const SUGGESTED = "I need black shoes under \u20B95,000.";
+
+const STEPS = ["Preferences", "Recommendations", "Review", "Approval", "Payment", "Receipt"];
+
+function currentStep(state: string): number {
+  if (state === "DRAFT" || state === "CLARIFYING") return 0;
+  if (state === "SHORTLISTED" || state === "QUOTED") return 1;
+  if (state === "AWAITING_APPROVAL") return 2;
+  if (state === "APPROVED") return 3;
+  if (state === "PAYMENT_PENDING" || state === "PAID_VERIFIED") return 4;
+  if (["FULFILLED", "REFUNDED", "FULFILMENT_FAILED", "COMPENSATION_PENDING"].includes(state)) return 5;
+  return 0;
+}
 
 export default function HomePage() {
   const [orderId, setOrderId] = useState<string | null>(null);
@@ -48,6 +62,7 @@ export default function HomePage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -86,7 +101,7 @@ export default function HomePage() {
     setOrderState(data.state);
     setRails(data.rails ?? []);
     setIndicators(data.indicators ?? { razorpay: "mock", x402: "mock", llm: "disabled" });
-    pushAgent("Hi, I'm the RunVista assistant. Tell me what you're looking for — e.g. \u201cblack running shoes under ₹5,000\u201d.");
+    pushAgent("Hi, I\u2019m the RunVista assistant. Tell me what you\u2019re looking for \u2014 e.g. \u201cblack running shoes under \u20B95,000\u201d.");
     setBusy(false);
   }, [pushAgent]);
 
@@ -165,7 +180,7 @@ export default function HomePage() {
     const data = await response.json();
     setOrderState(data.state);
     if (data.ok) {
-      pushAgent(`Approval bound to envelope hash ${quote.digest.slice(0, 16)}…`);
+      pushAgent(`Approval bound to envelope hash ${quote.digest.slice(0, 16)}\u2026`);
       setQuote((prev) => (prev ? { ...prev, approvalEventId: data.approvalEventId } : prev));
     } else {
       pushAgent(`Approval failed: ${data.error}`);
@@ -193,7 +208,7 @@ export default function HomePage() {
       if (isMock) {
         pushAgent("Razorpay order created. Complete the test payment to capture.");
       } else {
-        pushAgent("Opening Razorpay Checkout…");
+        pushAgent("Opening Razorpay Checkout\u2026");
         openRazorpayCheckout(
           data.attempt?.checkoutPayload,
           async (response) => {
@@ -237,7 +252,7 @@ export default function HomePage() {
       setOrderState(data.state);
       setPaymentIds((prev) => ({ ...prev, paymentId: externalPaymentId, signature }));
       if (data.ok) {
-        pushAgent(`Payment verified. Order is now PAID_VERIFIED — fulfilment may begin.`);
+        pushAgent(`Payment verified. Order is now PAID_VERIFIED \u2014 fulfilment may begin.`);
       } else {
         pushAgent(`Payment verification failed: ${data.error}`);
       }
@@ -293,7 +308,7 @@ export default function HomePage() {
       setOrderState(data.state);
       if (data.ok) {
         setQuote(null);
-        pushAgent(`Material change detected: ${data.changes.join("; ")}. Approval invalidated — REAPPROVAL_REQUIRED.`);
+        pushAgent(`Material change detected: ${data.changes.join("; ")}. Approval invalidated \u2014 REAPPROVAL_REQUIRED.`);
         setNotice("Approval invalidated. A new envelope with the changed terms must be approved before payment.");
       } else {
         pushAgent(`Tamper simulation failed: ${data.error}`);
@@ -321,7 +336,7 @@ export default function HomePage() {
     const secondData = await second.json();
     pushAgent(
       `Webhook replay: first delivery ${firstData.processed ? "processed" : "failed"} (${firstData.deduplicated ? "dedup" : "fresh"}), ` +
-        `second delivery ${secondData.deduplicated ? "deduplicated — no second state transition" : "processed"}.`,
+        `second delivery ${secondData.deduplicated ? "deduplicated \u2014 no second state transition" : "processed"}.`,
     );
     setOrderState((await fetch(`/api/audit?orderId=${orderId}`)).ok ? orderState : orderState);
     void refreshTimeline(orderId);
@@ -374,8 +389,8 @@ export default function HomePage() {
     setOrderId(data.orderId);
     setOrderState(data.state);
     setTimeline(data.events ?? []);
-    pushAgent("Hi, I'm the RunVista assistant. Tell me what you're looking for.");
-    pushAgent("I need black shoes under ₹5,000.");
+    pushAgent("Hi, I\u2019m the RunVista assistant. Tell me what you\u2019re looking for.");
+    pushAgent("I need black shoes under \u20B95,000.");
     for (const clarification of ["UK 9", "Road running up to 10K", "Wide fit", "Cushioning preferred", "Must be returnable", "Delivery before Sunday"]) {
       pushAgent(clarification);
     }
@@ -389,271 +404,226 @@ export default function HomePage() {
   }, [pushAgent]);
 
   const isMock = rails.find((r) => r.rail === "razorpay_checkout")?.isMock ?? true;
+  const step = currentStep(orderState);
+  const hasQuickReplies = quickReplies.length > 0;
 
   return (
-    <main className="page">
-      <header className="header">
-        <div>
-          <h1>AgentReady Commerce</h1>
-          <div className="sub">RunVista Sports — merchant-specific agentic storefront</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span className={`badge ${razorpayBadgeTone(indicators.razorpay)}`}>
-            Razorpay {razorpayBadgeLabel(indicators.razorpay)}
-          </span>
-          <span className={`badge ${indicators.x402 === "live" ? "live" : "mock"}`}>
-            x402 {indicators.x402 === "live" ? "live" : "MOCK"}
-          </span>
-          <span className={`badge ${indicators.llm === "disabled" ? "mock" : "live"}`}>
-            LLM {indicators.llm === "disabled" ? "disabled" : indicators.llm}
-          </span>
-          <span className={`state ${stateTone(orderState)}`}>{orderState}</span>
-          <button className="btn" onClick={runScenario} disabled={busy}>
-            Run prepared scenario
+    <div className="app-shell">
+      {/* ── Top bar ── */}
+      <header className="topbar" role="banner">
+        <RunVistaBrand />
+        <nav className="topbar-nav" aria-label="Main navigation">
+          <span className="active">Shop</span>
+          <button type="button" onClick={() => setDrawerOpen(true)} className="trust-badge">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 1L2 4v4c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V4L8 1z" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              <path d="M5.5 8l2 2 3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Order &amp; trust
           </button>
-          <button className="btn" onClick={startSession} disabled={busy}>
-            New conversation
-          </button>
-          <button className="btn" onClick={resetDemo} disabled={busy}>
-            Reset server state
-          </button>
-        </div>
+          <a href="/demo">Demo Lab</a>
+        </nav>
       </header>
 
-      <section>
-        <div className="panel">
-          <h2>Conversation</h2>
-          <div className="chat" ref={chatRef}>
+      {/* ── Two-column layout ── */}
+      <div className="page-grid">
+        {/* ── Chat column ── */}
+        <section className="chat-col" aria-label="Conversation">
+          <div className="chat-header">
+            <h1>{matches ? "Your shortlist is ready" : "Find your next running shoe"}</h1>
+            <p>{matches ? "Based on your requirements and preferences." : "Tell me how you run and I\u2019ll shortlist honest options."}</p>
+          </div>
+          <div className="chat-messages" ref={chatRef} role="log" aria-live="polite">
             {messages.map((message, index) => (
               <div key={index} className={`msg ${message.role}`}>
                 {message.text}
               </div>
             ))}
-            {questions.length > 0 && (
+            {hasQuickReplies && (
               <div className="msg agent">
-                {questions.length === 1 ? (
-                  <span>Required: {questions[0]}</span>
-                ) : (
-                  <span>Required details: {questions.join(" · ")}</span>
-                )}
-                {quickReplies.length > 0 && (
-                  <div className="quick">
-                    {quickReplies.map((reply) => (
-                      <button key={reply} onClick={() => send(reply)} disabled={busy}>
-                        {reply}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <div className="quick-btns">
+                  {quickReplies.map((reply) => (
+                    <button key={reply} type="button" className="quick-btn" onClick={() => send(reply)} disabled={busy}>
+                      {reply}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
-          <div className="input-row">
+          <div className="composer" role="form" aria-label="Message input">
             <input
+              className="composer-input"
               type="text"
               value={input}
-              placeholder={messages.length === 0 ? SUGGESTED : "Reply to the assistant…"}
+              placeholder={messages.length === 0 ? SUGGESTED : "Ask about a shoe, compare, or refine\u2026"}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") void send(input || SUGGESTED);
               }}
+              aria-label="Message the assistant"
             />
-            <button className="btn primary" onClick={() => send(input || SUGGESTED)} disabled={busy}>
+            <button
+              className="composer-send"
+              type="button"
+              onClick={() => send(input || SUGGESTED)}
+              disabled={busy}
+            >
               Send
             </button>
           </div>
-          {messages.length === 0 && (
-            <div className="quick">
-              <button onClick={() => send(SUGGESTED)} disabled={busy}>
-                {SUGGESTED}
-              </button>
-            </div>
-          )}
-        </div>
+        </section>
 
-        {notice && (
-          <div className="panel" style={{ borderColor: "var(--warn)" }}>
-            <h3 style={{ color: "var(--warn)" }}>Failure theatre</h3>
-            <div>{notice}</div>
-          </div>
-        )}
-
-        {matches && (
-          <div className="panel">
-            <h2>Ranked shortlist</h2>
-            {machineSpend && (
-              <div className="hint" style={{ color: "var(--warn)", marginBottom: 8 }}>
-                Machine tool spend: {machineSpend.amount} USDC via x402 v2 · {machineSpend.network} ·{" "}
-                <span className="mono">{machineSpend.txHash.slice(0, 16)}…</span> · {machineSpend.mock ? "MOCK demo settlement" : "live"} — this is agent spend for the fit-scoring API, separate from your shoe purchase.
-              </div>
-            )}
-            <div className="cards">
-              {matches.map((match) => {
-                const fitScore = fitScores?.[match.product.productId];
-                return (
-                  <div key={match.product.productId} className="card" onClick={() => chooseProduct(match.product.productId)}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span className="score">score {match.score}</span>
-                      <span className="tag">{match.product.brand}</span>
-                    </div>
-                    <h3>{match.product.name}</h3>
-                    <div className="price">₹{(match.product.priceMinor / 100).toFixed(2)}</div>
-                    <div className="tag">
-                      {match.product.useCase} · {match.product.fit} fit · {match.product.cushioning} cushioning · up to{" "}
-                      {match.product.typicalDistanceKm}K
-                    </div>
-                    {fitScore && (
-                      <div className="score">
-                        fit-score {fitScore.fitScore}/100 — {fitScore.note}
-                      </div>
-                    )}
-                    {match.reasons.map((reason) => (
-                      <div key={reason} className="good">
-                        + {reason}
-                      </div>
-                    ))}
-                    {match.compromises.map((compromise) => (
-                      <div key={compromise} className="comp">
-                        − {compromise}
-                      </div>
-                    ))}
-                    <div className="hint">Click to quote</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {quote && <ApprovalPanel quote={quote} onApprove={approve} busy={busy} />}
-
-        {quote && quote.approvalEventId && (
-          <div className="panel">
-            <h2>Payment</h2>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {!paymentIds?.orderId && (
-                <button className="btn primary" onClick={initiate} disabled={busy}>
-                  Pay with Razorpay (UPI · Card · Netbanking)
-                </button>
-              )}
-              {paymentIds?.orderId && isMock && !paymentIds.paymentId && (
-                <button className="btn primary" onClick={mockCapture} disabled={busy}>
-                  Complete test payment
-                </button>
-              )}
-              {paymentIds?.orderId && !isMock && !paymentIds.paymentId && (
-                <button className="btn primary" onClick={initiate} disabled={busy}>
-                  Reopen Razorpay Checkout
-                </button>
-              )}
-            </div>
-            {paymentIds?.orderId && (
-              <div className="hint">
-                Razorpay order: <span className="mono">{paymentIds.orderId}</span>
-                {paymentIds.paymentId && (
-                  <>
-                    {" "}· payment: <span className="mono">{paymentIds.paymentId}</span>
-                  </>
-                )}
-                {paymentIds.signature && <> · signature verified</>}
-              </div>
-            )}
-            {(orderState === "PAID_VERIFIED" || orderState === "FULFILMENT_PENDING" || orderState === "FULFILLED") && (
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button className="btn primary" onClick={() => fulfil(false)} disabled={busy}>
-                  Fulfil order
-                </button>
-              </div>
-            )}
-            {(orderState === "FULFILMENT_FAILED" || orderState === "COMPENSATION_PENDING") && (
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button className="btn primary" onClick={compensate} disabled={busy}>
-                  Start refund
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-      </section>
-
-      <aside>
-        <div className="panel">
-          <h2>Audit timeline</h2>
-          <div className="timeline">
-            {timeline.length === 0 && <div className="hint">No events yet.</div>}
-            {timeline.map((event) => (
-              <div key={event.eventId} className="tl-event">
-                <div className="tl-head">
-                  <span className="tl-type">{event.type}</span>
-                  <span className="tl-time">{new Date(event.occurredAt).toLocaleTimeString()}</span>
-                  {event.decision && <span className={event.decision}>{event.decision}</span>}
-                </div>
-                <div className="tl-summary">{event.summary}</div>
-                {event.externalReferences && (
-                  <div className="mono">
-                    {Object.entries(event.externalReferences)
-                      .map(([key, value]) => `${key}: ${value}`)
-                      .join(" · ")}
-                  </div>
-                )}
-              </div>
+        {/* ── Content column ── */}
+        <section className="content-col" aria-label="Recommendations">
+          {/* Progress steps */}
+          <div className="progress-steps" role="navigation" aria-label="Order progress">
+            {STEPS.map((label, i) => (
+              <span key={label} className={`step${i === step ? " active" : ""}`}>
+                <span className="step-num">{i + 1}</span> {label}
+              </span>
             ))}
           </div>
-        </div>
 
-        <div className="panel">
-          <h2>Failure theatre</h2>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <button className="btn" onClick={() => tamper("price")} disabled={busy || !quote?.approvalEventId}>
-              Simulate price change after approval
-            </button>
-            <button className="btn" onClick={() => tamper("variant")} disabled={busy || !quote?.approvalEventId}>
-              Simulate variant change after approval
-            </button>
-            <button className="btn" onClick={() => send("I need black shoes under ₹5,000.")} disabled={busy}>
-              Duplicate agent request
-            </button>
-            <button className="btn" onClick={replayWebhook} disabled={busy || !paymentIds?.orderId}>
-              Replay payment webhook
-            </button>
-            <button className="btn danger" onClick={() => fulfil(true)} disabled={busy || orderState !== "PAID_VERIFIED"}>
-              Simulate fulfilment failure
-            </button>
-          </div>
-          <div className="hint">Each scenario produces visible audit events and a state transition — no code edits.</div>
-        </div>
-
-        <div className="panel">
-          <h2>Conformance — critical invariants</h2>
-          <button className="btn primary" onClick={runConformance} disabled={busy}>
-            Run conformance suite
-          </button>
-          {conformance && (
-            <table className="conformance" style={{ marginTop: 10, width: "100%", borderCollapse: "collapse" }}>
-              <tbody>
-                {conformance.checks.map((check) => (
-                  <tr key={check.id}>
-                    <td className={check.pass ? "pass" : "fail"}>{check.pass ? "PASS" : "FAIL"}</td>
-                    <td>
-                      <div>{check.name}</div>
-                      <div className="hint">{check.detail}</div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {/* Constraint chips */}
+          {matches && (
+            <ConstraintChips
+              requirements={[
+                { label: "UK 9" },
+                { label: "Max \u20B95,000" },
+                { label: "Road running" },
+                { label: "Returnable" },
+              ]}
+              preferences={[
+                { label: "Black" },
+                { label: "Wide fit" },
+                { label: "Cushioning" },
+              ]}
+            />
           )}
-          {conformance && (
-            <div className="hint">
-              {conformance.passCount}/{conformance.checks.length} gates passing. This verifies our declared invariants; it does
-              not certify external infrastructure.
+
+          {/* Recommendations */}
+          {matches && (
+            <>
+              <div className="recs-header">
+                <h2>Recommendations</h2>
+                <a href="#refine">Cheaper options &rarr;</a>
+              </div>
+              <div className="recs-grid">
+                {matches.map((match) => (
+                  <ProductCard
+                    key={match.product.productId}
+                    match={match}
+                    fitScore={fitScores?.[match.product.productId]}
+                    onSelect={chooseProduct}
+                    disabled={busy}
+                  />
+                ))}
+              </div>
+              {machineSpend && (
+                <p style={{ fontSize: 12, color: "var(--warn)", marginTop: 12 }}>
+                  Machine tool spend: {machineSpend.amount} USDC via x402 v2 &middot; {machineSpend.network} &middot; {machineSpend.txHash.slice(0, 16)}\u2026 &middot; {machineSpend.mock ? "MOCK demo settlement" : "live"}
+                </p>
+              )}
+            </>
+          )}
+
+          {/* Empty state */}
+          {!matches && messages.length > 0 && (
+            <div className="empty-state">
+              <h3>Recommendations appear here</h3>
+              <p>Answer the question above and I\u2019ll shortlist your best matches.</p>
             </div>
           )}
-        </div>
-      </aside>
-    </main>
+
+          {/* Quote / approval panel */}
+          {quote && (
+            <div style={{ marginTop: 20 }}>
+              <ApprovalPanel quote={quote} onApprove={approve} busy={busy} />
+            </div>
+          )}
+
+          {/* Payment controls */}
+          {quote && quote.approvalEventId && (
+            <div style={{ marginTop: 16 }}>
+              <PaymentControls
+                orderState={orderState}
+                paymentIds={paymentIds}
+                isMock={isMock}
+                busy={busy}
+                onInitiate={initiate}
+                onMockCapture={mockCapture}
+                onFulfil={() => fulfil(false)}
+                onCompensate={compensate}
+              />
+            </div>
+          )}
+
+          {/* Notice / failure */}
+          {notice && (
+            <div style={{ marginTop: 16, padding: 14, background: "var(--warn-soft)", borderRadius: "var(--radius)", fontSize: 13, color: "var(--warn)" }}>
+              {notice}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* ── Trust Drawer ── */}
+      <TrustDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        quote={quote}
+        paymentIds={paymentIds}
+        timeline={timeline}
+        conformance={conformance}
+        onRunConformance={runConformance}
+        onTamperPrice={() => tamper("price")}
+        onTamperVariant={() => tamper("variant")}
+        onReplayWebhook={replayWebhook}
+        onRunScenario={runScenario}
+        onReset={resetDemo}
+        onNewSession={startSession}
+        orderState={orderState}
+        busy={busy}
+        isMock={isMock}
+        indicators={indicators}
+      />
+    </div>
   );
 }
+
+/* ─── Constraint Chips ─── */
+
+function ConstraintChips({
+  requirements,
+  preferences,
+}: {
+  requirements: { label: string }[];
+  preferences: { label: string }[];
+}) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="chip-group-label">Requirements</div>
+      <div className="chip-row">
+        {requirements.map((r) => (
+          <span key={r.label} className="chip requirement">
+            {r.label} <span className="chip-x" aria-hidden="true">&times;</span>
+          </span>
+        ))}
+      </div>
+      <div className="chip-group-label" style={{ marginTop: 8 }}>Preferences</div>
+      <div className="chip-row">
+        {preferences.map((p) => (
+          <span key={p.label} className="chip preference">
+            {p.label} <span className="chip-x" aria-hidden="true">&times;</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Approval Panel ─── */
 
 function ApprovalPanel({
   quote,
@@ -666,50 +636,327 @@ function ApprovalPanel({
 }) {
   const { envelope } = quote;
   return (
-    <div className="panel" style={{ borderColor: quote.approvalEventId ? "var(--good)" : "var(--accent)" }}>
-      <h2>Commerce Envelope {quote.approvalEventId ? "— APPROVED" : "— awaiting approval"}</h2>
-      <h3>{envelope.items[0]?.variant?.size} {envelope.items.map((item) => item.sku).join(", ")}</h3>
-      <div className="kv">
-        <span className="k">Item</span>
-        <span>{envelope.items[0]?.sku}</span>
-        <span className="k">Variant</span>
-        <span>{JSON.stringify(envelope.items[0]?.variant)}</span>
-        <span className="k">Quantity</span>
-        <span>{envelope.items[0]?.quantity}</span>
-        <span className="k">Subtotal</span>
-        <span>₹{(envelope.subtotalMinor / 100).toFixed(2)}</span>
-        <span className="k">Shipping</span>
-        <span>₹{(envelope.shippingMinor / 100).toFixed(2)}</span>
-        <span className="k">Total</span>
-        <span>₹{(envelope.totalMinor / 100).toFixed(2)}</span>
-        <span className="k">Return policy</span>
-        <span>Returnable within 14 days, unworn</span>
-        <span className="k">Quote expiry</span>
-        <span>{new Date(envelope.expiresAt).toLocaleString()}</span>
-        <span className="k">Currency</span>
-        <span>{envelope.currency}</span>
-        <span className="k">Merchant</span>
-        <span>{envelope.merchantId}</span>
-        <span className="k">Logical order</span>
-        <span className="mono">{envelope.logicalOrderId}</span>
+    <div className="demo-panel" style={{ borderLeftColor: quote.approvalEventId ? "var(--good)" : "var(--accent)", borderLeftWidth: 3 }}>
+      <h3>Commerce Envelope {quote.approvalEventId ? "\u2014 APPROVED" : "\u2014 awaiting approval"}</h3>
+      <div style={{ fontSize: 13, marginBottom: 8 }}>
+        {envelope.items[0]?.variant?.size} {envelope.items.map((item) => item.sku).join(", ")}
       </div>
-      <div className="digest-box">SHA-256: {quote.digest}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: "4px 10px", fontSize: 12, marginBottom: 10 }}>
+        <span style={{ color: "var(--text-soft)" }}>Item</span>
+        <span>{envelope.items[0]?.sku}</span>
+        <span style={{ color: "var(--text-soft)" }}>Variant</span>
+        <span>{JSON.stringify(envelope.items[0]?.variant)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Quantity</span>
+        <span>{envelope.items[0]?.quantity}</span>
+        <span style={{ color: "var(--text-soft)" }}>Subtotal</span>
+        <span>{"\u20B9"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Shipping</span>
+        <span>{"\u20B9"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Total</span>
+        <span style={{ fontWeight: 600 }}>{"\u20B9"}{(envelope.totalMinor / 100).toFixed(2)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Return policy</span>
+        <span>Returnable within 14 days, unworn</span>
+        <span style={{ color: "var(--text-soft)" }}>Currency</span>
+        <span>{envelope.currency}</span>
+      </div>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg)", border: "1px dashed var(--border)", borderRadius: "var(--radius-sm)", wordBreak: "break-all", marginBottom: 10 }}>
+        SHA-256: {quote.digest}
+      </div>
       {!quote.approvalEventId && (
-        <button className="btn primary" onClick={onApprove} disabled={busy}>
+        <button className="demo-btn primary" type="button" onClick={onApprove} disabled={busy}>
           Approve exact envelope hash
         </button>
       )}
-      <div className="hint">Approval binds to this exact hash. Any material change invalidates it and requires reapproval.</div>
+      <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+        Approval binds to this exact hash. Any material change invalidates it and requires reapproval.
+      </p>
     </div>
   );
 }
 
-function stateTone(state: string): string {
-  if (["APPROVED", "PAID_VERIFIED", "FULFILLED", "REFUNDED"].includes(state)) return "good";
-  if (["EXPIRED", "PAYMENT_FAILED", "FULFILMENT_FAILED", "REAPPROVAL_REQUIRED", "MANUAL_REVIEW"].includes(state)) return "bad";
-  if (["COMPENSATION_PENDING", "PAYMENT_PENDING", "AWAITING_APPROVAL"].includes(state)) return "warn";
-  return "";
+/* ─── Payment Controls ─── */
+
+function PaymentControls({
+  orderState,
+  paymentIds,
+  isMock,
+  busy,
+  onInitiate,
+  onMockCapture,
+  onFulfil,
+  onCompensate,
+}: {
+  orderState: string;
+  paymentIds: { orderId?: string; paymentId?: string; signature?: string } | null;
+  isMock: boolean;
+  busy: boolean;
+  onInitiate: () => void;
+  onMockCapture: () => void;
+  onFulfil: () => void;
+  onCompensate: () => void;
+}) {
+  return (
+    <div className="demo-panel">
+      <h3>Payment</h3>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        {!paymentIds?.orderId && (
+          <button className="demo-btn primary" type="button" onClick={onInitiate} disabled={busy}>
+            Pay with Razorpay (UPI &middot; Card &middot; Netbanking)
+          </button>
+        )}
+        {paymentIds?.orderId && isMock && !paymentIds.paymentId && (
+          <button className="demo-btn primary" type="button" onClick={onMockCapture} disabled={busy}>
+            Complete test payment
+          </button>
+        )}
+        {paymentIds?.orderId && !isMock && !paymentIds.paymentId && (
+          <button className="demo-btn primary" type="button" onClick={onInitiate} disabled={busy}>
+            Reopen Razorpay Checkout
+          </button>
+        )}
+      </div>
+      {paymentIds?.orderId && (
+        <div style={{ fontSize: 12, color: "var(--text-soft)" }}>
+          Razorpay order: <span style={{ fontFamily: "var(--mono)" }}>{paymentIds.orderId}</span>
+          {paymentIds.paymentId && (
+            <> &middot; payment: <span style={{ fontFamily: "var(--mono)" }}>{paymentIds.paymentId}</span></>
+          )}
+          {paymentIds.signature && <> &middot; signature verified</>}
+        </div>
+      )}
+      {(orderState === "PAID_VERIFIED" || orderState === "FULFILMENT_PENDING" || orderState === "FULFILLED") && (
+        <div style={{ marginTop: 8 }}>
+          <button className="demo-btn primary" type="button" onClick={onFulfil} disabled={busy}>Fulfil order</button>
+        </div>
+      )}
+      {(orderState === "FULFILMENT_FAILED" || orderState === "COMPENSATION_PENDING") && (
+        <div style={{ marginTop: 8 }}>
+          <button className="demo-btn primary" type="button" onClick={onCompensate} disabled={busy}>Start refund</button>
+        </div>
+      )}
+    </div>
+  );
 }
+
+/* ─── Trust Drawer ─── */
+
+function TrustDrawer({
+  open,
+  onClose,
+  quote,
+  paymentIds,
+  timeline,
+  conformance,
+  onRunConformance,
+  onTamperPrice,
+  onTamperVariant,
+  onReplayWebhook,
+  onRunScenario,
+  onReset,
+  onNewSession,
+  orderState,
+  busy,
+  isMock,
+  indicators,
+}: {
+  open: boolean;
+  onClose: () => void;
+  quote: QuoteResult | null;
+  paymentIds: { orderId?: string; paymentId?: string; signature?: string } | null;
+  timeline: AuditEvent[];
+  conformance: ConformanceReport | null;
+  onRunConformance: () => void;
+  onTamperPrice: () => void;
+  onTamperVariant: () => void;
+  onReplayWebhook: () => void;
+  onRunScenario: () => void;
+  onReset: () => void;
+  onNewSession: () => void;
+  orderState: string;
+  busy: boolean;
+  isMock: boolean;
+  indicators: { razorpay: string; x402: string; llm: string };
+}) {
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open, onClose]);
+
+  return (
+    <>
+      <div className={`drawer-scrim${open ? " open" : ""}`} onClick={onClose} aria-hidden="true" />
+      <div
+        ref={drawerRef}
+        className={`drawer${open ? " open" : ""}`}
+        role="dialog"
+        aria-label="Order and trust"
+        aria-modal="true"
+        tabIndex={-1}
+      >
+        <div className="drawer-head">
+          <h2>Order &amp; trust</h2>
+          <button className="drawer-close" type="button" onClick={onClose} aria-label="Close drawer">&times;</button>
+        </div>
+        <div className="drawer-body">
+          {/* Payment verification */}
+          <div className="drawer-section">
+            <h3>1 &middot; Payment verification</h3>
+            <div className="drawer-box">
+              {quote && quote.approvalEventId ? (
+                <div className="drawer-status">
+                  {"\u2713"} Captured &mdash; {"\u20B9"}{(quote.envelope.totalMinor / 100).toFixed(2)} {quote.envelope.currency}
+                </div>
+              ) : (
+                <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Awaiting payment</div>
+              )}
+              {paymentIds?.orderId && (
+                <div className="drawer-kv">
+                  <span className="mono">{paymentIds.orderId}</span>
+                </div>
+              )}
+              {paymentIds?.paymentId && (
+                <div className="drawer-kv">
+                  <span className="mono">{paymentIds.paymentId}</span>
+                </div>
+              )}
+              {paymentIds?.signature && (
+                <div style={{ fontSize: 12, color: "var(--good)" }}>Signature verified</div>
+              )}
+            </div>
+          </div>
+
+          {/* Approved order */}
+          <div className="drawer-section">
+            <h3>2 &middot; Approved order</h3>
+            <div className="drawer-box">
+              {quote ? (
+                <>
+                  <div className="drawer-kv">
+                    <span className="label">Item</span>
+                    <span className="value">{quote.envelope.items[0]?.sku}</span>
+                  </div>
+                  <div className="drawer-kv">
+                    <span className="label">Total</span>
+                    <span className="value">{"\u20B9"}{(quote.envelope.totalMinor / 100).toFixed(2)} + {"\u20B9"}{(quote.envelope.shippingMinor / 100).toFixed(2)} shipping</span>
+                  </div>
+                  <div className="drawer-kv">
+                    <span className="label">Return policy</span>
+                    <span className="value">Returnable within 14 days, unworn</span>
+                  </div>
+                  <div className="drawer-kv">
+                    <span className="label">Envelope</span>
+                    <span className="mono">{quote.digest.slice(0, 12)}\u2026</span>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: "var(--text-muted)" }}>No order yet</div>
+              )}
+            </div>
+          </div>
+
+          {/* Audit history */}
+          <div className="drawer-section">
+            <h3>3 &middot; Audit history</h3>
+            <div className="drawer-box">
+              {timeline.length === 0 ? (
+                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No events yet.</div>
+              ) : (
+                <div className="drawer-timeline">
+                  {timeline.map((event) => (
+                    <div key={event.eventId} className="timeline-row">
+                      <span className="event">{event.summary}</span>
+                      <span className="time">{new Date(event.occurredAt).toLocaleTimeString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Conformance */}
+          <div className="drawer-section">
+            <h3>4 &middot; Conformance</h3>
+            <button className="demo-btn primary" type="button" onClick={onRunConformance} disabled={busy}>
+              Run conformance suite
+            </button>
+            {conformance && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 13, color: "var(--good)", marginBottom: 6 }}>
+                  {conformance.passCount}/{conformance.checks.length} gates passing
+                </div>
+                <div className="conformance-list">
+                  {conformance.checks.map((check) => (
+                    <div key={check.id} className="gate-row">
+                      <span className="gate-id">{check.id}</span>
+                      <span className="gate-name">{check.name}</span>
+                      <span className={check.pass ? "gate-pass" : "gate-fail"}>{check.pass ? "PASS" : "FAIL"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Failure theatre */}
+          <div className="drawer-section">
+            <h3>5 &middot; Failure theatre</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button className="demo-btn" type="button" onClick={onTamperPrice} disabled={busy || !quote?.approvalEventId}>
+                Price change after approval
+              </button>
+              <button className="demo-btn" type="button" onClick={onTamperVariant} disabled={busy || !quote?.approvalEventId}>
+                Variant change
+              </button>
+              <button className="demo-btn" type="button" onClick={onReplayWebhook} disabled={busy || !paymentIds?.orderId}>
+                Replay webhook
+              </button>
+            </div>
+          </div>
+
+          {/* Providers */}
+          <div className="drawer-section">
+            <h3>6 &middot; Providers &amp; modes</h3>
+            <div className="drawer-box">
+              <div className="provider-row">
+                <span className="prov-name">Razorpay</span>
+                <span className="prov-detail">rzp_test_ keys &middot; capture verified</span>
+                <span className={`prov-mode ${indicators.razorpay}`}>{indicators.razorpay === "test" ? "TEST MODE" : indicators.razorpay === "live" ? "live" : "MOCK"}</span>
+              </div>
+              <div className="provider-row">
+                <span className="prov-name">x402 / Solana</span>
+                <span className="prov-detail">demo settlement &middot; tx_mock_\u2026</span>
+                <span className="prov-mode mock">MOCK</span>
+              </div>
+              <div className="provider-row">
+                <span className="prov-name">LLM</span>
+                <span className="prov-detail">deterministic fallback active</span>
+                <span className="prov-mode disabled">disabled</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Demo controls */}
+          <div className="drawer-section">
+            <h3>7 &middot; Demo controls</h3>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button className="demo-btn" type="button" onClick={onRunScenario} disabled={busy}>Run scenario</button>
+              <button className="demo-btn" type="button" onClick={onNewSession} disabled={busy}>New conversation</button>
+              <button className="demo-btn" type="button" onClick={onReset} disabled={busy}>Reset server</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ─── Helpers ─── */
 
 function openRazorpayCheckout(
   payload: Record<string, unknown> | undefined,
@@ -746,16 +993,4 @@ function openRazorpayCheckout(
     onCancel("Could not load the Razorpay Checkout script. Check your network connection.");
   };
   document.body.appendChild(script);
-}
-
-function razorpayBadgeLabel(mode: string): string {
-  if (mode === "test") return "TEST MODE";
-  if (mode === "live") return "live";
-  return "MOCK";
-}
-
-function razorpayBadgeTone(mode: string): string {
-  if (mode === "test") return "test";
-  if (mode === "live") return "live";
-  return "mock";
 }
