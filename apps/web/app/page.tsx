@@ -439,15 +439,18 @@ export default function HomePage() {
                 {message.text}
               </div>
             ))}
-            {hasQuickReplies && (
+            {questions.length > 0 && (
               <div className="msg agent">
-                <div className="quick-btns">
-                  {quickReplies.map((reply) => (
-                    <button key={reply} type="button" className="quick-btn" onClick={() => send(reply)} disabled={busy}>
-                      {reply}
-                    </button>
-                  ))}
-                </div>
+                {questions.length === 1 ? questions[0] : questions.join(" \u00B7 ")}
+              </div>
+            )}
+            {hasQuickReplies && (
+              <div className="quick-btns" role="group" aria-label="Quick replies">
+                {quickReplies.map((reply) => (
+                  <button key={reply} type="button" className="quick-btn" onClick={() => send(reply)} disabled={busy}>
+                    {reply}
+                  </button>
+                ))}
               </div>
             )}
           </div>
