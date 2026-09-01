@@ -162,6 +162,7 @@ describe("services integration with a stub provider", () => {
       enabled: true,
       extractSoftPreferences: async () => ({ fit: "wide", cushioning: "max" }),
       explainRecommendation: async () => "Based on the structured evidence, the Max Cushion suits wide-fit runners best.",
+      interpret: async () => null,
     };
     const { getServices } = await import("../lib/services");
     const services = getServices(
@@ -189,6 +190,7 @@ describe("services integration with a stub provider", () => {
       enabled: true,
       extractSoftPreferences: async () => ({ fit: "wide", cushioning: "max" }),
       explainRecommendation: async () => "Based on the structured evidence, the Max Cushion suits wide-fit runners best.",
+      interpret: async () => null,
     };
     const { getServices } = await import("../lib/services");
     const services = getServices(
