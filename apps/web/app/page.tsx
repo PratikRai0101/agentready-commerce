@@ -217,7 +217,7 @@ export default function HomePage() {
         setOrderState(data.state);
         setLoadingMsg(null);
 
-        // Extract intent from response
+        // Extract intent from response — merge with existing fields
         const newFields: IntentField[] = [];
         if (data.kind === "clarify") {
           setQuote(null);
@@ -228,7 +228,8 @@ export default function HomePage() {
           pushAgent(data.message);
           setQuestions(data.questions);
           setQuickReplies(data.quickReplies);
-          // Show unresolved from questions
+          // Keep existing intent fields, add unresolved from questions
+          newFields.push(...intent.filter((f) => f.kind !== "unresolved"));
           for (const q of data.questions) {
             newFields.push({ key: `unresolved_${q}`, label: q, value: "", kind: "unresolved", editable: false });
           }
@@ -244,17 +245,19 @@ export default function HomePage() {
           if (data.state !== "AWAITING_APPROVAL") setQuote(null);
           setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
           setMachineSpend(data.machineSpend ?? null);
-          // Construct intent chips from actual parsed intent, not product data
-          const intent = data.parsedIntent;
-          if (intent) {
-            if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
-            if (intent.maxAmountMinor) newFields.push({ key: "budget", label: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
-            if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
-            if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
-            if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
-            if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
-            if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
+          // Merge server parsedIntent with existing fields
+          const existingByKey = new Map(intent.map((f) => [f.key, f]));
+          const parsed = data.parsedIntent;
+          if (parsed) {
+            if (parsed.size) existingByKey.set("size", { key: "size", label: parsed.size, value: parsed.size, kind: "requirement", editable: true });
+            if (parsed.maxAmountMinor) existingByKey.set("budget", { key: "budget", label: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            if (parsed.fit) existingByKey.set("fit", { key: "fit", label: `${parsed.fit} fit`, value: parsed.fit, kind: "preference", editable: true });
+            if (parsed.cushioning) existingByKey.set("cushioning", { key: "cushioning", label: `${parsed.cushioning} cushioning`, value: parsed.cushioning, kind: "preference", editable: true });
+            if (parsed.distanceKm) existingByKey.set("distance", { key: "distance", label: `~${parsed.distanceKm}K distance`, value: String(parsed.distanceKm), kind: "preference", editable: true });
+            if (parsed.colour) existingByKey.set("colour", { key: "colour", label: parsed.colour, value: parsed.colour, kind: "preference", editable: true });
+            if (parsed.mustBeReturnable) existingByKey.set("returnable", { key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
           }
+          newFields.push(...existingByKey.values());
         } else if (data.kind === "error") {
           pushAgent(data.message);
           setErrorMsg(data.message);
@@ -266,17 +269,19 @@ export default function HomePage() {
               recommendationActionToken: data.recommendationActionToken,
             });
             setQuote(null);
-            // Reconstruct intent chips from parsed intent when available
+            // Merge server parsedIntent with existing fields
+            const existingByKey = new Map(intent.map((f) => [f.key, f]));
             if (data.parsedIntent) {
-              const intent = data.parsedIntent;
-              if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
-              if (intent.maxAmountMinor) newFields.push({ key: "budget", label: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
-              if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
-              if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
-              if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
-              if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
-              if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
+              const parsed = data.parsedIntent;
+              if (parsed.size) existingByKey.set("size", { key: "size", label: parsed.size, value: parsed.size, kind: "requirement", editable: true });
+              if (parsed.maxAmountMinor) existingByKey.set("budget", { key: "budget", label: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+              if (parsed.fit) existingByKey.set("fit", { key: "fit", label: `${parsed.fit} fit`, value: parsed.fit, kind: "preference", editable: true });
+              if (parsed.cushioning) existingByKey.set("cushioning", { key: "cushioning", label: `${parsed.cushioning} cushioning`, value: parsed.cushioning, kind: "preference", editable: true });
+              if (parsed.distanceKm) existingByKey.set("distance", { key: "distance", label: `~${parsed.distanceKm}K distance`, value: String(parsed.distanceKm), kind: "preference", editable: true });
+              if (parsed.colour) existingByKey.set("colour", { key: "colour", label: parsed.colour, value: parsed.colour, kind: "preference", editable: true });
+              if (parsed.mustBeReturnable) existingByKey.set("returnable", { key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
             }
+            newFields.push(...existingByKey.values());
           }
         } else if (data.kind === "compare") {
           const { productA, productB, facts } = data;
@@ -308,16 +313,63 @@ export default function HomePage() {
   );
 
   const handleChipRemove = useCallback(
-    (key: string) => {
-      setIntent((prev) => prev.filter((f) => f.key !== key));
-      const field = intent.find((f) => f.key === key);
-      if (field && field.kind === "preference") {
-        void send(`Remove ${field.label} preference`);
-      } else if (field && field.kind === "requirement") {
-        void send(`Remove ${field.label} requirement`);
+    async (key: string) => {
+      if (!orderId) return;
+      setBusy(true);
+      try {
+        // Build patch that removes the field by setting it to undefined via the server
+        const patch: Record<string, unknown> = {};
+        if (key === "size") patch.size = "";
+        else if (key === "colour") patch.colour = "";
+        else if (key === "useCase") patch.useCase = "";
+        else if (key === "fit") patch.fit = "";
+        else if (key === "cushioning") patch.cushioning = "";
+        else if (key === "distance") patch.distanceKm = 0;
+        else if (key === "returnable") patch.mustBeReturnable = false;
+        else if (key === "budget") patch.maxAmountMinor = 1_000_000;
+        else {
+          // Unknown key — just remove locally
+          setIntent((prev) => prev.filter((f) => f.key !== key));
+          setBusy(false);
+          return;
+        }
+
+        const response = await fetch("/api/intent-patch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId, intentPatch: patch, expectedIntentVersion: intentVersion }),
+        });
+        const data = await response.json();
+        if (data.ok) {
+          // Rebuild intent from server response
+          const newFields: IntentField[] = [];
+          if (data.parsedIntent) {
+            const intent = data.parsedIntent;
+            if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
+            if (intent.maxAmountMinor && intent.maxAmountMinor < 1_000_000) newFields.push({ key: "budget", label: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
+            if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
+            if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
+            if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
+            if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
+          }
+          setIntent(newFields);
+          if (typeof data.intentVersion === "number") setIntentVersion(data.intentVersion);
+          setOrderState(data.state);
+          setMatches(data.matches ?? []);
+          if (data.recommendationBinding) setRecommendationBinding(data.recommendationBinding);
+          if (data.state !== "AWAITING_APPROVAL") setQuote(null);
+          pushAgent(`Removed ${key}. Here are your refreshed options.`);
+          void refreshTimeline(orderId);
+        } else {
+          pushAgent(`Could not remove: ${data.error}`);
+        }
+      } catch {
+        pushAgent("Something went wrong. Please retry.");
       }
+      setBusy(false);
     },
-    [intent, send],
+    [orderId, intentVersion, pushAgent, refreshTimeline],
   );
 
   const handleChipEdit = useCallback(
