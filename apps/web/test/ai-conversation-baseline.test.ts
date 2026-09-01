@@ -400,14 +400,17 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     expect(result.match.scoreNormalized).toBeGreaterThan(0);
   });
 
-  it("'show me something cheaper' does not produce a cheaper alternative (defect L4)", async () => {
+  it("'show me something cheaper' produces a grounded cheaper response (AI-3)", async () => {
     const services = getServices(env, { forceMock: true, llm: DISABLED_LLM });
     const session = startSession(services);
     await services.respond(session.logicalOrderId, "I need black shoes under ₹5,000");
     await services.respond(session.logicalOrderId, "UK 9");
     await services.respond(session.logicalOrderId, "road");
     const result = await services.respond(session.logicalOrderId, "show me something cheaper");
-    expect(result.kind).toBe("shortlist");
+    expect(result.kind).toBe("cheaper");
+    if (result.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(result.message).toContain("₹");
+    expect(result.message.length).toBeGreaterThan(20);
   });
 
   it("refinement before approval re-ranks (AI-2: L3 fixed)", async () => {
