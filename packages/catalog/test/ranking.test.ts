@@ -59,8 +59,8 @@ describe("rankProducts", () => {
     const intent = baseIntent({ size: "UK 10", useCase: "road" });
     const result = rankProducts(intent, SHOE_CATALOG);
     for (const match of result.matches) {
-      expect(match.sizeAvailable).toBe(true);
-      expect(match.inStock).toBe(true);
+      expect(match.eligibility.sizeAvailable).toBe(true);
+      expect(match.eligibility.inStock).toBe(true);
     }
   });
 

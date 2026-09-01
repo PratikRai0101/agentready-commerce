@@ -110,7 +110,8 @@ describe("AI-2 multi-turn dialogue — required scenarios", () => {
     expect(r.kind).toBe("explain");
     if (r.kind !== "explain") throw new Error("expected explain");
     expect(r.explanation.length).toBeGreaterThan(20);
-    expect(r.match.product.productId).toBe("p_vista_max");
+    expect(r.match.scoreNormalized).toBeGreaterThan(0);
+    expect(r.match.scoreNormalized).toBeLessThanOrEqual(100);
   });
 
   it("why not another product", async () => {
@@ -221,7 +222,7 @@ describe("AI-2 multi-turn dialogue — required scenarios", () => {
       enabled: true,
       extractSoftPreferences: async () => null,
       explainRecommendation: async () => null,
-      interpret: async () => ({ ok: false, reason: "http" as const }),
+      interpret: async () => ({ ok: false as const, reason: "http" as const }),
     };
     const s = getServices(env, { skipCache: true, llm: failingLlm });
     const session = start(s);

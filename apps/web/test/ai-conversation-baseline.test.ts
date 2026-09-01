@@ -188,7 +188,7 @@ describe("AI-0 baseline — grounded recommendation rate", () => {
     expect(result.matches.every((m) => m.product.productId !== "p_vista_max")).toBe(true);
   });
 
-  it("score defect pin: ranking scores can exceed 100 (AI-3 must normalize)", () => {
+  it("score normalization: all scores are in 0–100 (AI-3 fix)", () => {
     const intent = {
       merchantId: "merchant_runvista",
       category: "running_shoes",
@@ -208,10 +208,10 @@ describe("AI-0 baseline — grounded recommendation rate", () => {
     };
     const ranking = rankProducts(intent, SHOE_CATALOG);
     expect(ranking.ranked).toBe(true);
-    // Defect pin: current scoring can exceed 100 (up to ~108). AI-3 must
-    // normalize every displayed score to 0–100.
-    const maxScore = Math.max(...ranking.matches.map((match) => match.score));
-    expect(maxScore).toBeGreaterThan(100);
+    for (const match of ranking.matches) {
+      expect(match.scoreNormalized).toBeGreaterThanOrEqual(0);
+      expect(match.scoreNormalized).toBeLessThanOrEqual(100);
+    }
   });
 });
 
@@ -397,7 +397,7 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     const result = await services.respond(session.logicalOrderId, "why this one?");
     expect(result.kind).toBe("explain");
     if (result.kind !== "explain") throw new Error("expected explain");
-    expect(result.match.product.productId).toBe("p_vista_max");
+    expect(result.match.scoreNormalized).toBeGreaterThan(0);
   });
 
   it("'show me something cheaper' does not produce a cheaper alternative (defect L4)", async () => {

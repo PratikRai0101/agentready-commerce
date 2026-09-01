@@ -12,7 +12,7 @@ type Props = {
 };
 
 export function ProductCard({ match, fitScore, roleLabel, onSelect, disabled, showSelect }: Props) {
-  const { product, score, reasons, compromises } = match;
+  const { product, scoreNormalized, role, matchedPreferences, compromises, eligibility } = match;
   const price = `\u20B9${(product.priceMinor / 100).toLocaleString("en-IN")}`;
 
   return (
@@ -39,9 +39,9 @@ export function ProductCard({ match, fitScore, roleLabel, onSelect, disabled, sh
             {fitScore.fitScore}% match
           </div>
         ) : (
-          <div className="product-card-match">score {score}</div>
+          <div className="product-card-match">{scoreNormalized}/100</div>
         )}
-        {reasons.map((r) => (
+        {matchedPreferences.map((r) => (
           <div key={r} className="product-card-reason">
             &bull; {r}
           </div>

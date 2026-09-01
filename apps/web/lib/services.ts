@@ -932,7 +932,7 @@ function handleCompare(
     differences.push(`${matchA.product.name} handles up to ${matchA.product.typicalDistanceKm}K; ${matchB.product.name} up to ${matchB.product.typicalDistanceKm}K`);
   }
   for (const m of [matchA, matchB]) {
-    if (m.reasons.length > 0) strengths.push(`${m.product.name}: ${m.reasons.join("; ")}`);
+    if (m.matchedPreferences.length > 0) strengths.push(`${m.product.name}: ${m.matchedPreferences.join("; ")}`);
     if (m.compromises.length > 0) compromises.push(`${m.product.name}: ${m.compromises.join("; ")}`);
   }
   void audit.log({
@@ -970,9 +970,10 @@ function handleExplain(
   }
   const parts: string[] = [];
   parts.push(`${target.product.name} is a ${target.product.fit}-fit, ${target.product.cushioning}-cushioned ${target.product.useCase} shoe.`);
-  if (target.reasons.length > 0) parts.push(`Strengths: ${target.reasons.join("; ")}.`);
+  if (target.matchedPreferences.length > 0) parts.push(`Strengths: ${target.matchedPreferences.join("; ")}.`);
   if (target.compromises.length > 0) parts.push(`Trade-offs: ${target.compromises.join("; ")}.`);
   parts.push(`Priced at ₹${(target.product.priceMinor / 100).toFixed(0)}, rated ${target.product.rating}/5, ships in ${target.product.deliveryLeadDays} day${target.product.deliveryLeadDays === 1 ? "" : "s"}.`);
+  parts.push(`Score: ${target.scoreNormalized}/100 — ${target.roleJustification}.`);
   void audit.log({
     logicalOrderId: orderId, type: "action.explain", actor: "agent",
     summary: `Explained ${target.product.name}`,

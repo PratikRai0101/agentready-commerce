@@ -218,13 +218,13 @@ export function productMatchToExplainInput(match: ProductMatch): ExplainInput["m
     name: product.name,
     brand: product.brand,
     priceText: `₹${(product.priceMinor / 100).toFixed(2)}`,
-    score: match.score,
+    score: match.scoreNormalized,
     fit: product.fit,
     cushioning: product.cushioning,
     useCase: product.useCase,
     typicalDistanceKm: product.typicalDistanceKm,
-    inStock: match.inStock,
-    reasons: match.reasons,
+    inStock: match.eligibility.inStock,
+    reasons: [...match.matchedRequirements, ...match.matchedPreferences],
     compromises: match.compromises,
   };
 }
