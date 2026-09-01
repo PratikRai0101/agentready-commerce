@@ -17,6 +17,12 @@ const SIZES = ["UK 6", "UK 7", "UK 8", "UK 9", "UK 10", "UK 11"];
 const COLOURS = ["black", "white", "grey", "navy", "blue", "red"];
 const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
+/** True when `token` appears negated ("not black", "don't want gym", "no navy", ...). */
+export function isNegated(text: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b(?:not|no|never|don'?t\\s+(?:want|like|need)|do\\s+not\\s+(?:want|like|need))\\s+(?:a|the|any)?\\s*${escaped}\\b`, "i").test(text);
+}
+
 export function parseIntentMessage(message: string): ParsedIntent {
   const text = message.toLowerCase().replace(/[,.]/g, " ");
   const parsed: ParsedIntent = {};
@@ -45,10 +51,14 @@ export function parseIntentMessage(message: string): ParsedIntent {
     if (num >= 6 && num <= 11) parsed.size = `UK ${num}`;
   }
 
-  const useCase = USE_CASES.find((use) => text.includes(use) || (use === "road" && text.includes("running")));
+  const useCase = USE_CASES.find((use) => {
+    if (isNegated(text, use)) return false;
+    if (use === "road" && isNegated(text, "running")) return false;
+    return text.includes(use) || (use === "road" && text.includes("running"));
+  });
   if (useCase) parsed.useCase = useCase;
 
-  const colour = COLOURS.find((colour) => text.includes(colour));
+  const colour = COLOURS.find((colour) => !isNegated(text, colour) && text.includes(colour));
   if (colour) parsed.colour = colour;
 
   if (/\breturn\w*\b/.test(text)) parsed.mustBeReturnable = true;

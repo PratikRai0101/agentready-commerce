@@ -20,6 +20,9 @@ const DISABLED_LLM: LlmProvider = {
   async explainRecommendation() {
     return null;
   },
+  async interpret() {
+    return null;
+  },
 };
 
 function failingLlm(kind: "malformed" | "timeout" | "http500"): LlmProvider {
@@ -127,18 +130,18 @@ describe("AI-0 baseline — constraint extraction accuracy", () => {
     }
     console.log(`[ai-0] extraction accuracy: ${correct}/${EXTRACTION_CASES.length}`);
     for (const failure of failures) console.log(`[ai-0] extraction failure: ${failure}`);
-    // Baseline: 8/10 — negation cases intentionally fail today (defects).
-    expect(correct).toBe(8);
+    // AI-1: negation defects fixed — extraction now fully correct.
+    expect(correct).toBe(EXTRACTION_CASES.length);
   });
 
-  it("negation defect pin: 'not black' currently sets colour=black (AI-1 must flip)", () => {
+  it("negation handled: 'not black' must NOT set colour=black (AI-1)", () => {
     const parsed = parseIntentMessage("not black");
-    expect(parsed.colour).toBe("black");
+    expect(parsed.colour).toBeUndefined();
   });
 
-  it("negation defect pin: 'not gym' currently sets useCase=gym (AI-1 must flip)", () => {
+  it("negation handled: 'not gym' must NOT set useCase=gym (AI-1)", () => {
     const parsed = parseIntentMessage("I don't want gym shoes");
-    expect(parsed.useCase).toBe("gym");
+    expect(parsed.useCase).toBeUndefined();
   });
 });
 
