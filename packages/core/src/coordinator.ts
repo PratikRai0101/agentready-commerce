@@ -86,7 +86,7 @@ export function createOperationCoordinator(store: OperationStore): OperationCoor
       record.outcome = outcome;
       if (resultRef !== undefined) record.resultRef = resultRef;
       if (errorRef !== undefined) record.errorRef = errorRef;
-      if (resultPayload !== undefined) record.resultPayload = resultPayload;
+      if (resultPayload !== undefined) record.resultPayload = structuredClone(resultPayload);
       record.updatedAt = new Date().toISOString();
       store.set(operationId, record);
     },

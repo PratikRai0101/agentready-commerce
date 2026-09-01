@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
 import type { OperationRecord } from "./types";
 
 export type OperationStore = {
@@ -35,8 +35,6 @@ function decrypt(key: Buffer, ciphertext: string): string {
   return decipher.update(encrypted) + decipher.final("utf8");
 }
 
-import { createHash } from "node:crypto";
-
 export class EncryptedOperationStore implements OperationStore {
   private data = new Map<string, string>();
   private key: Buffer;
@@ -72,11 +70,12 @@ export class MemoryOperationStore implements OperationStore {
   private data = new Map<string, OperationRecord>();
 
   get(operationId: string): OperationRecord | undefined {
-    return this.data.get(operationId);
+    const record = this.data.get(operationId);
+    return record ? structuredClone(record) : undefined;
   }
 
   set(operationId: string, record: OperationRecord): void {
-    this.data.set(operationId, record);
+    this.data.set(operationId, structuredClone(record));
   }
 
   has(operationId: string): boolean {
