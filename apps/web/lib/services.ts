@@ -22,6 +22,12 @@ import {
   type PurchaseMandate,
 } from "@agentready/domain";
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
+import {
+  createOperationCoordinator,
+  MemoryOperationStore,
+  type OperationCoordinator,
+  type IdempotencyResult,
+} from "@agentready/core";
 import { intentDigest, SIZES, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
@@ -73,15 +79,15 @@ export type RespondResult =
   | { kind: "restart"; state: OrderState };
 
 export type AppServices = {
-  createSession(): Session;
-  respond(orderId: string, message: string, binding?: RecommendationBinding): Promise<RespondResult>;
-  buildQuote(orderId: string, productId: string, binding?: RecommendationBinding): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
-  approve(orderId: string, digest: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
-  initiatePayment(orderId: string, rail: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
+  createSession(operationId?: string): Session;
+  respond(orderId: string, message: string, binding?: RecommendationBinding, operationId?: string): Promise<RespondResult>;
+  buildQuote(orderId: string, productId: string, binding?: RecommendationBinding, operationId?: string): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
+  approve(orderId: string, digest: string, operationId?: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
+  initiatePayment(orderId: string, rail: string, operationId?: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
   mockCapture(orderId: string): Promise<{ paymentId: string; signature: string; orderId: string }>;
-  verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
-  fulfil(orderId: string, fail: boolean): Promise<{ ok: boolean; state: OrderState; error?: string }>;
-  compensate(orderId: string): Promise<{ ok: boolean; state: OrderState; error?: string; refundId?: string }>;
+  verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
+  fulfil(orderId: string, fail: boolean, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
+  compensate(orderId: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string; refundId?: string }>;
   tamper(orderId: string, field: "price" | "variant"): Promise<{ ok: boolean; state: OrderState; changes: string[]; error?: string }>;
   timeline(orderId: string): Promise<AuditEvent[]>;
   getSession(orderId: string): Session | undefined;
@@ -102,6 +108,7 @@ export type AppServices = {
   intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; error?: string; reasonCodes?: string[] }>;
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
+  coordinator: OperationCoordinator;
   razorpayKeySecret: string;
   webhookSecret: string | undefined;
   isMock: boolean;
@@ -157,6 +164,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const machineResource = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
   const llm = options?.llm ?? createLlmProvider(env);
   const sessionOperations = new Map<string, Promise<unknown>>();
+  const operationStore = new MemoryOperationStore();
+  const coordinator = createOperationCoordinator(operationStore);
 
   function withSessionLock<T>(orderId: string, operation: () => Promise<T>): Promise<T> {
     const previous = sessionOperations.get(orderId) ?? Promise.resolve();
@@ -170,15 +179,28 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const services: AppServices = {
     registry,
     audit,
+    coordinator,
     razorpayKeySecret,
     webhookSecret,
     isMock,
     razorpayMode,
     llm,
 
-    createSession() {
+    createSession(operationId) {
       const logicalOrderId = newId("ord");
       const customerId = DEMO_CUSTOMER;
+
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "session.create", { customerId }, logicalOrderId);
+        if (idempotency.kind === "replay") {
+          const existing = sessions.get(idempotency.record.aggregateIdentity);
+          if (existing) return existing;
+        }
+        if (idempotency.kind === "conflict") {
+          throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
+        }
+      }
+
       const mandate = buildMandate(customerId);
       mandates.set(customerId, mandate);
       const session: Session = {
@@ -197,6 +219,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Session created for ${customerId}`,
         externalReferences: { mandateId: mandate.mandateId },
       });
+      if (operationId) {
+        coordinator.complete(operationId, "success", logicalOrderId);
+      }
       return session;
     },
 
@@ -212,8 +237,18 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return mandates.get(customerId);
     },
 
-    async respond(orderId, message, selectionBinding) {
+    async respond(orderId, message, selectionBinding, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "session.create", { customerId: DEMO_CUSTOMER }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { kind: "error", message: `Operation ID conflict: ${operationId} was already used with a different request`, state: "DRAFT" } as RespondResult;
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          return { kind: "restart", state: session?.state ?? "DRAFT" } as RespondResult;
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) {
         return { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
@@ -372,6 +407,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
 
+      if (operationId) {
+        coordinator.complete(operationId, "success", session.state);
+      }
       return {
         kind: "shortlist",
         message: (acknowledgement ? acknowledgement + " " : "") + replyMessage,
@@ -385,8 +423,28 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       });
     },
 
-    async buildQuote(orderId, productId, selectionBinding) {
+    async buildQuote(orderId, productId, selectionBinding, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "quote.build", { orderId, productId }, orderId);
+        if (idempotency.kind === "conflict") {
+          throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const record = envelopes.get(orderId);
+          if (record) {
+            const session = sessions.get(orderId);
+            return {
+              envelope: record.envelope,
+              digest: record.digest,
+              signature: record.signature,
+              state: session?.state ?? "AWAITING_APPROVAL",
+              approvalEventId: session?.approvalEventId,
+              ...record.recommendation,
+            };
+          }
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) throw new Error("Unknown session");
 
@@ -459,6 +517,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Envelope ${digest.slice(0, 16)}… for ${product.name} ${size} — ${formatMinor(total)}`,
         inputDigest: digest,
       });
+      if (operationId) {
+        coordinator.complete(operationId, "success", digest);
+      }
       return {
         envelope,
         digest,
@@ -470,8 +531,25 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       });
     },
 
-    async approve(orderId, digest) {
+    async approve(orderId, digest, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "approval.grant", { orderId, digest }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          if (idempotency.record.outcome === "success") {
+            return { ok: true, approvalEventId: idempotency.record.resultRef, state: session?.state ?? "APPROVED" };
+          }
+          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       const record = envelopes.get(orderId);
@@ -509,12 +587,42 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         decision: "allow",
         reasonCodes: ["approval_binds_hash"],
       });
+      if (operationId) {
+        coordinator.complete(operationId, "success", approvalEventId);
+      }
       return { ok: true, approvalEventId, state: session.state };
       });
     },
 
-    async initiatePayment(orderId, rail) {
+    async initiatePayment(orderId, rail, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "payment.initiate", { orderId, rail }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request`, reasonCodes: ["operation_conflict"] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          if (idempotency.record.outcome === "success") {
+            const attempt: PaymentAttempt = {
+              attemptId: idempotency.record.resultRef ?? "att_replay",
+              logicalOrderId: orderId,
+              rail: "razorpay_checkout",
+              externalOrderId: session?.externalOrderId ?? "",
+              status: "created",
+              createdAt: new Date().toISOString(),
+              amountMinor: 0,
+              currency: "INR",
+            };
+            return { ok: true, attempt, state: session?.state ?? "PAYMENT_PENDING" };
+          }
+          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed", reasonCodes: ["operation_failed"] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress", reasonCodes: ["operation_pending"] };
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       const record = envelopes.get(orderId);
@@ -599,6 +707,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           externalReferences: { orderId: attempt.externalOrderId ?? "" },
           decision: "allow",
         });
+        if (operationId) {
+          coordinator.complete(operationId, "success", attempt.externalOrderId ?? undefined);
+        }
         return { ok: true, attempt, state: session.state };
       } catch (error) {
         setState(session, "PAYMENT_FAILED");
@@ -609,6 +720,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Order creation failed: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error));
+        }
         return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
       }
       });
@@ -622,7 +736,24 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return { paymentId, signature, orderId: session.externalOrderId };
     },
 
-    async verifyPayment(orderId, externalOrderId, externalPaymentId, signature) {
+    async verifyPayment(orderId, externalOrderId, externalPaymentId, signature, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "payment.verify", { orderId, externalOrderId, externalPaymentId }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          if (idempotency.record.outcome === "success") {
+            return { ok: true, state: session?.state ?? "PAID_VERIFIED" };
+          }
+          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       const record = envelopes.get(orderId);
@@ -669,6 +800,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["signature_invalid"],
         });
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, result.reason ?? "Verification failed");
+        }
         return { ok: false, state: session.state, error: result.reason ?? "Verification failed" };
       }
 
@@ -697,6 +831,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["rail_binding_failed"],
         });
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, `Payment binding rejected: ${bindingFailures.join("; ")}`);
+        }
         return { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` };
       }
 
@@ -715,10 +852,30 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         servicesReconcileHeld(orderId, session, audit, webhookDedup);
       }
 
+      if (operationId) {
+        coordinator.complete(operationId, "success", externalPaymentId);
+      }
       return { ok: true, state: session.state };
     },
 
-    async fulfil(orderId, fail) {
+    async fulfil(orderId, fail, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "fulfilment.complete", { orderId, fail }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          if (idempotency.record.outcome === "success") {
+            return { ok: true, state: session?.state ?? "FULFILLED" };
+          }
+          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       if (session.state !== "PAID_VERIFIED") {
@@ -735,6 +892,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "review",
           reasonCodes: ["inventory_unavailable"],
         });
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, "Simulated fulfilment failure: inventory unavailable");
+        }
         return { ok: false, state: session.state, error: "Simulated fulfilment failure: inventory unavailable" };
       }
       setState(session, "FULFILLED");
@@ -745,10 +905,30 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: "Order shipped",
         decision: "allow",
       });
+      if (operationId) {
+        coordinator.complete(operationId, "success", orderId);
+      }
       return { ok: true, state: session.state };
     },
 
-    async compensate(orderId) {
+    async compensate(orderId, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "compensation.refund", { orderId }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
+          const session = sessions.get(orderId);
+          if (idempotency.record.outcome === "success") {
+            return { ok: true, state: session?.state ?? "REFUNDED", refundId: idempotency.record.resultRef };
+          }
+          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       if (session.state !== "FULFILMENT_FAILED" && session.state !== "COMPENSATION_PENDING") {
@@ -780,6 +960,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "allow",
           reasonCodes: ["paid_fulfilment_failure_refunded"],
         });
+        if (operationId) {
+          coordinator.complete(operationId, "success", result.refundId ?? undefined);
+        }
         return { ok: true, state: session.state, refundId: result.refundId };
       } catch (error) {
         setState(session, "MANUAL_REVIEW");
@@ -790,6 +973,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Refund failed; routed to manual review: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error));
+        }
         return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
       }
     },
@@ -950,6 +1136,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       envelopes.clear();
       mandates.clear();
       webhookDedup.clear();
+      coordinator.clear();
       machineResource.reset();
       void audit.log({
         logicalOrderId: "system",
