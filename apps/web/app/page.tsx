@@ -598,6 +598,9 @@ export default function HomePage() {
         indicators={indicators}
         techExpanded={techExpanded}
         onToggleTech={() => setTechExpanded(!techExpanded)}
+        onRunScenario={runScenario}
+        onReset={resetDemo}
+        busy={busy}
       />
     </div>
   );
@@ -791,6 +794,9 @@ function TrustDrawer({
   indicators,
   techExpanded,
   onToggleTech,
+  onRunScenario,
+  onReset,
+  busy,
 }: {
   open: boolean;
   onClose: () => void;
@@ -803,6 +809,9 @@ function TrustDrawer({
   indicators: { razorpay: string; x402: string; llm: string };
   techExpanded: boolean;
   onToggleTech: () => void;
+  onRunScenario: () => void;
+  onReset: () => void;
+  busy: boolean;
 }) {
   const drawerRef = useRef<HTMLDivElement>(null);
 
@@ -971,6 +980,12 @@ function TrustDrawer({
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Demo quick actions */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button className="demo-btn" type="button" onClick={onRunScenario} disabled={busy}>Run scenario</button>
+            <button className="demo-btn" type="button" onClick={onReset} disabled={busy}>Reset</button>
           </div>
         </div>
       </div>
