@@ -27,6 +27,7 @@ import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitSc
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
 import { createDialogueMemory, syncMemory, invalidateQuote, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
+import { renderWhyThisOne, renderComparison, renderCompromises, renderCheaper } from "./explain";
 
 export type Session = {
   logicalOrderId: string;
@@ -914,30 +915,10 @@ function handleCompare(
   if (!matchA || !matchB) {
     return { kind: "error", message: "One or both of those products are not in your current shortlist.", state: session.state };
   }
-  const strengths: string[] = [];
-  const differences: string[] = [];
-  const compromises: string[] = [];
-  if (matchA.product.priceMinor !== matchB.product.priceMinor) {
-    const cheaper = matchA.product.priceMinor < matchB.product.priceMinor ? matchA.product.name : matchB.product.name;
-    const dearer = matchA.product.priceMinor > matchB.product.priceMinor ? matchA.product.name : matchB.product.name;
-    differences.push(`${cheaper} is cheaper than ${dearer}`);
-  }
-  if (matchA.product.fit !== matchB.product.fit) {
-    differences.push(`${matchA.product.name} is ${matchA.product.fit} fit; ${matchB.product.name} is ${matchB.product.fit} fit`);
-  }
-  if (matchA.product.cushioning !== matchB.product.cushioning) {
-    differences.push(`${matchA.product.name} has ${matchA.product.cushioning} cushioning; ${matchB.product.name} has ${matchB.product.cushioning} cushioning`);
-  }
-  if (matchA.product.typicalDistanceKm !== matchB.product.typicalDistanceKm) {
-    differences.push(`${matchA.product.name} handles up to ${matchA.product.typicalDistanceKm}K; ${matchB.product.name} up to ${matchB.product.typicalDistanceKm}K`);
-  }
-  for (const m of [matchA, matchB]) {
-    if (m.matchedPreferences.length > 0) strengths.push(`${m.product.name}: ${m.matchedPreferences.join("; ")}`);
-    if (m.compromises.length > 0) compromises.push(`${m.product.name}: ${m.compromises.join("; ")}`);
-  }
+  const { strengths, differences, compromises } = renderComparison(matchA, matchB);
   void audit.log({
     logicalOrderId: orderId, type: "action.compare", actor: "agent",
-    summary: `Compared ${matchA.product.name} vs ${matchB.product.name}`,
+    summary: `Compared ${matchA.product.name} (${matchA.scoreNormalized}/100) vs ${matchB.product.name} (${matchB.scoreNormalized}/100)`,
     inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["grounded_catalog_facts"],
   });
   return { kind: "compare", productA: matchA, productB: matchB, facts: { strengths, differences, compromises }, state: session.state };
@@ -958,28 +939,22 @@ function handleExplain(
   if (ids.length > 0) {
     target = ranking.matches.find((m) => m.product.productId === ids[0]);
   } else {
-    // "why this one?" / "why not X?" → try message-based product name extraction
     const messageProductIds = extractProductIdsFromMessage(session.message);
     if (messageProductIds.length > 0) {
       target = ranking.matches.find((m) => m.product.productId === messageProductIds[0]);
     }
-    if (!target) target = ranking.matches[0]; // default: explain the top match
+    if (!target) target = ranking.matches[0];
   }
   if (!target) {
     return { kind: "error", message: "That product is not in your current shortlist.", state: session.state };
   }
-  const parts: string[] = [];
-  parts.push(`${target.product.name} is a ${target.product.fit}-fit, ${target.product.cushioning}-cushioned ${target.product.useCase} shoe.`);
-  if (target.matchedPreferences.length > 0) parts.push(`Strengths: ${target.matchedPreferences.join("; ")}.`);
-  if (target.compromises.length > 0) parts.push(`Trade-offs: ${target.compromises.join("; ")}.`);
-  parts.push(`Priced at ₹${(target.product.priceMinor / 100).toFixed(0)}, rated ${target.product.rating}/5, ships in ${target.product.deliveryLeadDays} day${target.product.deliveryLeadDays === 1 ? "" : "s"}.`);
-  parts.push(`Score: ${target.scoreNormalized}/100 — ${target.roleJustification}.`);
+  const explanation = renderWhyThisOne(target, session.intent.maxAmountMinor);
   void audit.log({
     logicalOrderId: orderId, type: "action.explain", actor: "agent",
-    summary: `Explained ${target.product.name}`,
+    summary: `Explained ${target.product.name} (${target.scoreNormalized}/100, ${target.role})`,
     inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["grounded_catalog_facts"],
   });
-  return { kind: "explain", match: target, explanation: parts.join(" "), state: session.state };
+  return { kind: "explain", match: target, explanation, state: session.state };
 }
 
 function handleSelect(
