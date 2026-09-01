@@ -107,9 +107,9 @@ function buildMandate(customerId: string): PurchaseMandate {
   };
 }
 
-export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { forceMock?: boolean; llm?: LlmProvider }): AppServices {
+export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { forceMock?: boolean; llm?: LlmProvider; skipCache?: boolean }): AppServices {
   const globalServices = globalThis as unknown as { __agentreadyServices?: AppServices };
-  if (globalServices.__agentreadyServices) {
+  if (!options?.skipCache && globalServices.__agentreadyServices) {
     return globalServices.__agentreadyServices;
   }
 
@@ -833,7 +833,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
     },
   };
 
-  globalServices.__agentreadyServices = services;
+  if (!options?.skipCache) {
+    globalServices.__agentreadyServices = services;
+  }
   return services;
 }
 

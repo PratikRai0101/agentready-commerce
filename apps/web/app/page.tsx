@@ -56,11 +56,7 @@ function maskId(id: string): string {
 
 function humaniseEvent(event: AuditEvent): string {
   const s = event.summary;
-  if (s.includes("Ranked 3 products for")) {
-    const match = s.match(/"colour":"(\w+)"/);
-    const colour = match ? match[1] : "matching";
-    return `Ranked shoes for ${colour} preference`;
-  }
+  if (s.includes("Ranked 3 products for")) return "Recommendations ranked";
   if (s.includes("Paid RunVista Premium Fit-Scoring API")) return "Fit-scoring API call (x402)";
   if (s.includes("Session created")) return "Session started";
   if (s.includes("Got it")) {
@@ -113,7 +109,7 @@ export default function HomePage() {
     async (order: string) => {
       const response = await fetch(`/api/audit?orderId=${order}`);
       const data = await response.json();
-      setTimeline(data.events ?? []);
+      setTimeline((data.events ?? []).filter((e: AuditEvent) => e.logicalOrderId === order));
     },
     [],
   );
@@ -365,7 +361,7 @@ export default function HomePage() {
     const data = await response.json();
     setOrderId(data.orderId);
     setOrderState(data.state);
-    setTimeline(data.events ?? []);
+    setTimeline((data.events ?? []).filter((e: AuditEvent) => e.logicalOrderId === data.orderId));
     pushAgent("Hi, I\u2019m the RunVista assistant. Tell me what you\u2019re looking for.");
     pushAgent("I need black shoes under \u20B95,000.");
     for (const clarification of ["UK 9", "Road running up to 10K", "Wide fit", "Cushioning preferred", "Must be returnable", "Delivery before Sunday"]) {
@@ -633,6 +629,10 @@ function ReceiptView({
         <span>{item?.sku}</span>
         <span style={{ color: "var(--text-soft)" }}>Size</span>
         <span>{item?.variant?.size}</span>
+        <span style={{ color: "var(--text-soft)" }}>Subtotal</span>
+        <span>{"\u20B9"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Shipping</span>
+        <span>{"\u20B9"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Total</span>
         <span style={{ fontWeight: 600 }}>{"\u20B9"}{(envelope.totalMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Payment</span>
@@ -888,8 +888,16 @@ function TrustDrawer({
                     <span className="value">{quote.envelope.items[0]?.variant?.size}</span>
                   </div>
                   <div className="drawer-kv">
+                    <span className="label">Subtotal</span>
+                    <span className="value">{"\u20B9"}{(quote.envelope.subtotalMinor / 100).toFixed(2)}</span>
+                  </div>
+                  <div className="drawer-kv">
+                    <span className="label">Shipping</span>
+                    <span className="value">{"\u20B9"}{(quote.envelope.shippingMinor / 100).toFixed(2)}</span>
+                  </div>
+                  <div className="drawer-kv">
                     <span className="label">Total</span>
-                    <span className="value">{"\u20B9"}{(quote.envelope.totalMinor / 100).toFixed(2)} + {"\u20B9"}{(quote.envelope.shippingMinor / 100).toFixed(2)} shipping</span>
+                    <span className="value" style={{ fontWeight: 600 }}>{"\u20B9"}{(quote.envelope.totalMinor / 100).toFixed(2)}</span>
                   </div>
                   <div className="drawer-kv">
                     <span className="label">Return</span>

@@ -26,7 +26,7 @@ async function setupBindingSession(services: ReturnType<typeof getServices>) {
 }
 
 export async function GET() {
-  const services = getServices();
+  const services = getServices(process.env, { forceMock: true, skipCache: true });
   services.reset();
   const session = services.createSession();
   const orderId = session.logicalOrderId;
