@@ -11,6 +11,14 @@ export const MAX_DIALOGUE_MEMORY_BYTES = 4000;
 export const MAX_RECENT_ACTIONS = 10;
 
 export type DialogueMemory = {
+  /** Monotonic version of the intent that is authoritative on the server. */
+  intentVersion: number;
+  /** Monotonic version of the recommendation result shown to the customer. */
+  recommendationVersion: number;
+  /** Intent version used to produce the current recommendation result. */
+  recommendationIntentVersion?: number;
+  /** Opaque server-issued token bound to the current recommendation result. */
+  recommendationActionToken?: string;
   /** Requirements currently validated by deterministic parsing. */
   requirements: string[];
   /** Soft preferences currently validated. */
@@ -26,6 +34,10 @@ export type DialogueMemory = {
   /** Quote state. */
   quoteProductId?: string;
   quoteValid: boolean;
+  /** Versions bound to the active quote, when one exists. */
+  quoteIntentVersion?: number;
+  quoteRecommendationVersion?: number;
+  quoteActionToken?: string;
   /** Bounded recent conversational action labels. */
   recentActions: string[];
   /** Concise user-evidence references (max 10). */
@@ -34,6 +46,8 @@ export type DialogueMemory = {
 
 export function createDialogueMemory(): DialogueMemory {
   return {
+    intentVersion: 0,
+    recommendationVersion: 0,
     requirements: [],
     preferences: [],
     unresolved: [],
@@ -147,5 +161,15 @@ export function invalidateQuote(memory: DialogueMemory): void {
   memory.quoteValid = false;
   memory.selectedProductId = undefined;
   memory.quoteProductId = undefined;
+  memory.quoteIntentVersion = undefined;
+  memory.quoteRecommendationVersion = undefined;
+  memory.quoteActionToken = undefined;
   memory.comparedProductIds = [];
+}
+
+/** Remove server-side references to a recommendation result after an intent edit. */
+export function invalidateRecommendations(memory: DialogueMemory): void {
+  memory.shownProductIds = [];
+  memory.recommendationIntentVersion = undefined;
+  memory.recommendationActionToken = undefined;
 }

@@ -326,11 +326,11 @@ describe("AI-2 acceptance demo — full conversation path", () => {
     if (r7.kind !== "cheaper") throw new Error("expected cheaper");
     expect(r7.message).toContain("₹");
 
-    // 8. Select an eligible product
-    const r8 = await s.respond(session.logicalOrderId, "Select Streak 4.");
+    // 8. Select an eligible product from the refreshed cheaper-budget result
+    const r8 = await s.respond(session.logicalOrderId, "Select Stride Lite.");
     expect(r8.kind).toBe("select");
     if (r8.kind !== "select") throw new Error("expected select");
-    expect(r8.productId).toBe("p_streak_4");
+    expect(r8.productId).toBe("p_stride_lite");
 
     // 9. Verify any obsolete quote was invalidated (no stale envelope)
     // (We never called buildQuote in this flow, so quoteValid was never true)

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProductMatch } from "@agentready/catalog";
 import type { AuditEvent } from "@agentready/audit";
 import type { CommerceEnvelope } from "@agentready/domain";
+import type { RecommendationBinding } from "@/lib/services";
 import { RunVistaBrand } from "./components/RunVistaBrand";
 import { ProductCard } from "./components/ProductCard";
 import { IntentPanel, type IntentField } from "./components/IntentPanel";
@@ -100,6 +101,7 @@ export default function HomePage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [techExpanded, setTechExpanded] = useState(false);
   const [intent, setIntent] = useState<IntentField[]>([]);
+  const [recommendationBinding, setRecommendationBinding] = useState<RecommendationBinding | null>(null);
   const [loadingMsg, setLoadingMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -131,8 +133,10 @@ export default function HomePage() {
     setFitScores(null);
     setMachineSpend(null);
     setQuote(null);
+    setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
+    setIntent([]);
     const response = await fetch("/api/session", { method: "POST" });
     const data = await response.json();
     setOrderId(data.orderId);
@@ -147,7 +151,50 @@ export default function HomePage() {
     void startSession();
   }, [startSession]);
 
-const send = useCallback(
+  const chooseProduct = useCallback(
+    async (productId: string, suppliedBinding?: RecommendationBinding) => {
+      if (!orderId) return;
+      setBusy(true);
+      const response = await fetch("/api/quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId,
+          productId,
+          ...(suppliedBinding ?? recommendationBinding ?? {}),
+        }),
+      });
+      const data = await response.json();
+      if (data.error) {
+        pushAgent(`Could not quote: ${data.error}`);
+        setErrorMsg(data.error);
+        setQuote(null);
+        if (data.matches) {
+          setMatches(data.matches);
+          setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
+          setRecommendationBinding({
+            intentVersion: data.intentVersion,
+            recommendationVersion: data.recommendationVersion,
+            recommendationActionToken: data.recommendationActionToken,
+          });
+        }
+        if (data.state) setOrderState(data.state);
+      } else {
+        setQuote(data);
+        setRecommendationBinding({
+          intentVersion: data.intentVersion,
+          recommendationVersion: data.recommendationVersion,
+          recommendationActionToken: data.recommendationActionToken,
+        });
+        setOrderState(data.state);
+        pushAgent(`Prepared an exact quote for you. Review and approve the envelope below.`);
+      }
+      setBusy(false);
+    },
+    [orderId, pushAgent, recommendationBinding],
+  );
+
+  const send = useCallback(
     async (raw: string) => {
       const text = raw.trim();
       if (!text || !orderId) return;
@@ -171,6 +218,11 @@ const send = useCallback(
         // Extract intent from response
         const newFields: IntentField[] = [];
         if (data.kind === "clarify") {
+          setQuote(null);
+          setMatches(null);
+          setFitScores(null);
+          setMachineSpend(null);
+          setRecommendationBinding(null);
           pushAgent(data.message);
           setQuestions(data.questions);
           setQuickReplies(data.quickReplies);
@@ -181,6 +233,12 @@ const send = useCallback(
         } else if (data.kind === "shortlist") {
           pushAgent(data.message);
           setMatches(data.matches);
+          setRecommendationBinding({
+            intentVersion: data.intentVersion,
+            recommendationVersion: data.recommendationVersion,
+            recommendationActionToken: data.recommendationActionToken,
+          });
+          if (data.state !== "AWAITING_APPROVAL") setQuote(null);
           setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
           setMachineSpend(data.machineSpend ?? null);
           // Extract intent from matches
@@ -194,6 +252,15 @@ const send = useCallback(
         } else if (data.kind === "error") {
           pushAgent(data.message);
           setErrorMsg(data.message);
+          if (data.matches) {
+            setMatches(data.matches);
+            setRecommendationBinding({
+              intentVersion: data.intentVersion,
+              recommendationVersion: data.recommendationVersion,
+              recommendationActionToken: data.recommendationActionToken,
+            });
+            setQuote(null);
+          }
         } else if (data.kind === "compare") {
           const { productA, productB, facts } = data;
           const diffText = facts.differences.length > 0 ? facts.differences.join("; ") : "No major differences found.";
@@ -203,7 +270,11 @@ const send = useCallback(
         } else if (data.kind === "cheaper") {
           pushAgent(data.message);
         } else if (data.kind === "select") {
-          await chooseProduct(data.productId);
+          await chooseProduct(data.productId, {
+            intentVersion: data.intentVersion,
+            recommendationVersion: data.recommendationVersion,
+            recommendationActionToken: data.recommendationActionToken,
+          });
         } else if (data.kind === "restart") {
           await startSession();
         }
@@ -217,28 +288,6 @@ const send = useCallback(
       setBusy(false);
     },
     [orderId, pushAgent, refreshTimeline, startSession, chooseProduct],
-  );
-
-  const chooseProduct = useCallback(
-    async (productId: string) => {
-      if (!orderId) return;
-      setBusy(true);
-      const response = await fetch("/api/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId, productId }),
-      });
-      const data = await response.json();
-      if (data.error) {
-        pushAgent(`Could not quote: ${data.error}`);
-      } else {
-        setQuote(data);
-        setOrderState(data.state);
-        pushAgent(`Prepared an exact quote for you. Review and approve the envelope below.`);
-      }
-      setBusy(false);
-    },
-    [orderId, pushAgent],
   );
 
   const handleChipRemove = useCallback(
@@ -404,9 +453,11 @@ const send = useCallback(
     setFitScores(null);
     setMachineSpend(null);
     setQuote(null);
+    setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
     setNotice(null);
+    setIntent([]);
     pushAgent("Server state reset. Fresh conversation started.");
     setBusy(false);
   }, [pushAgent]);
@@ -422,22 +473,22 @@ const send = useCallback(
     setMachineSpend(null);
     setQuote(null);
     setPaymentIds(null);
+    setRecommendationBinding(null);
+    setIntent([]);
     const response = await fetch("/api/scenario");
     const data = await response.json();
     setOrderId(data.orderId);
     setOrderState(data.state);
     setTimeline((data.events ?? []).filter((e: AuditEvent) => e.logicalOrderId === data.orderId));
-    pushAgent("Hi, I\u2019m the RunVista assistant. Tell me what you\u2019re looking for.");
-    pushAgent("I need black shoes under \u20B95,000.");
-    for (const clarification of ["UK 9", "Road running up to 10K", "Wide fit", "Cushioning preferred", "Must be returnable", "Delivery before Sunday"]) {
-      pushAgent(clarification);
-    }
-    if (data.final?.message) pushAgent(data.final.message);
-    if (data.final?.kind === "shortlist") {
-      setMatches(data.final.matches);
-      setFitScores(Object.fromEntries((data.final.fitScores ?? []).map((s: { productId: string; fitScore: number; note: string }) => [s.productId, s])));
-      setMachineSpend(data.machineSpend ?? data.final.machineSpend ?? null);
-    }
+    setMessages((data.transcript ?? []).map((entry: { role: "user" | "agent"; text: string }) => ({
+      role: entry.role,
+      text: stripScores(entry.text),
+    })));
+    setMatches(data.currentRecommendations ?? data.final?.matches ?? null);
+    setFitScores(Object.fromEntries((data.fitScores ?? []).map((s: { productId: string; fitScore: number; note: string }) => [s.productId, s])));
+    setMachineSpend(data.machineSpend ?? null);
+    setQuote(data.quote ?? null);
+    setRecommendationBinding((data.currentRecommendationBinding as RecommendationBinding | undefined) ?? null);
     setBusy(false);
   }, [pushAgent]);
 
@@ -762,6 +813,10 @@ function ApprovalPanel({
         <span>{"\u20B9"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Total</span>
         <span style={{ fontWeight: 600 }}>{"\u20B9"}{(envelope.totalMinor / 100).toFixed(2)}</span>
+        <span style={{ color: "var(--text-soft)" }}>Envelope hash</span>
+        <code style={{ fontFamily: "var(--mono)", fontSize: 11, overflowWrap: "anywhere" }}>{quote.digest}</code>
+        <span style={{ color: "var(--text-soft)" }}>Expires</span>
+        <time dateTime={envelope.expiresAt}>{envelope.expiresAt}</time>
         <span style={{ color: "var(--text-soft)" }}>Return</span>
         <span>Returnable within 14 days, unworn</span>
       </div>

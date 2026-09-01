@@ -65,7 +65,7 @@ export function parseIntentMessage(message: string): ParsedIntent {
   });
   if (useCase) parsed.useCase = useCase;
 
-  const colour = COLOURS.find((colour) => !isNegated(text, colour) && text.includes(colour));
+  const colour = COLOURS.find((colour) => !isNegated(text, colour) && new RegExp(`\\b${colour}\\b`).test(text));
   if (colour) parsed.colour = colour;
 
   if (/\breturn\w*\b/.test(text)) parsed.mustBeReturnable = true;

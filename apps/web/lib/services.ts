@@ -26,8 +26,14 @@ import { intentDigest, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
-import { createDialogueMemory, syncMemory, invalidateQuote, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
+import { createDialogueMemory, syncMemory, invalidateQuote, invalidateRecommendations, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
 import { renderWhyThisOne, renderComparison, renderCompromises, renderCheaper } from "./explain";
+
+export type RecommendationBinding = {
+  intentVersion: number;
+  recommendationVersion: number;
+  recommendationActionToken: string;
+};
 
 export type Session = {
   logicalOrderId: string;
@@ -52,22 +58,24 @@ export type EnvelopeRecord = {
   digest: string;
   signature: string;
   issuedAt: string;
+  recommendation: RecommendationBinding;
+  intentDigest: string;
 };
 
 export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
-  | { kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState }
-  | { kind: "error"; message: string; state: OrderState }
+  | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
+  | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
   | { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState }
   | { kind: "cheaper"; currentBest: ProductMatch; cheaperOption: ProductMatch | null; message: string; state: OrderState }
-  | { kind: "select"; productId: string; state: OrderState }
+  | ({ kind: "select"; productId: string; message: string; state: OrderState } & RecommendationBinding)
   | { kind: "restart"; state: OrderState };
 
 export type AppServices = {
   createSession(): Session;
-  respond(orderId: string, message: string): Promise<RespondResult>;
-  buildQuote(orderId: string, productId: string): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState }>;
+  respond(orderId: string, message: string, binding?: RecommendationBinding): Promise<RespondResult>;
+  buildQuote(orderId: string, productId: string, binding?: RecommendationBinding): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
   approve(orderId: string, digest: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
   initiatePayment(orderId: string, rail: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
   mockCapture(orderId: string): Promise<{ paymentId: string; signature: string; orderId: string }>;
@@ -147,6 +155,16 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const signingSecret = env.ENVELOPE_SIGNING_SECRET ?? "dev-secret-change-me";
   const machineResource = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
   const llm = options?.llm ?? createLlmProvider(env);
+  const sessionOperations = new Map<string, Promise<unknown>>();
+
+  function withSessionLock<T>(orderId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = sessionOperations.get(orderId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    sessionOperations.set(orderId, current);
+    return current.finally(() => {
+      if (sessionOperations.get(orderId) === current) sessionOperations.delete(orderId);
+    });
+  }
 
   const services: AppServices = {
     registry,
@@ -193,7 +211,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return mandates.get(customerId);
     },
 
-    async respond(orderId, message) {
+    async respond(orderId, message, selectionBinding) {
+      return withSessionLock(orderId, async () => {
       const session = sessions.get(orderId);
       if (!session) {
         return { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
@@ -205,7 +224,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       const deterministic = deterministicInterpretation(message, session.intent);
       const outcome = await interpretUserMessage(message, session.intent, llm);
       const merged = mergeInterpretation(deterministic, outcome);
-      const hadQuoteBefore = session.dialogue.quoteValid;
+      const previousIntent = { ...session.intent };
+      const previousEnvelope = envelopes.get(orderId);
       applyInterpretation(session, merged);
 
       // Legacy soft-preference enrichment only when AI-1 fell back to
@@ -234,26 +254,37 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         reasonCodes: outcome.rejectedReasons.length > 0 ? outcome.rejectedReasons.slice(0, 5) : ["schema_validated"],
       });
 
-      // ── Material change invalidation (pre-approval only) ──
-      const materialChange = merged.corrections.length > 0 || merged.removals.length > 0 ||
-        merged.proposedHardConstraints.some((c) => session.intent[c.name as keyof ParsedIntent] !== undefined);
+      const materialChange = hasIntentChanged(previousIntent, session.intent);
       let quoteInvalidated = false;
-      if (materialChange && hadQuoteBefore) {
+      if (materialChange) {
+        session.dialogue.intentVersion += 1;
+        session.lastRanking = undefined;
+        invalidateRecommendations(session.dialogue);
         invalidateQuote(session.dialogue);
-        quoteInvalidated = true;
-        void audit.log({ logicalOrderId: orderId, type: "quote.invalidated", actor: "system",
-          summary: `Quote invalidated due to material change: corrections=[${merged.corrections.join(",")}] removals=[${merged.removals.join(",")}]`,
-          inputDigest: intentDigest(session.intent), decision: "block", reasonCodes: ["material_change_refinement"] });
+        session.approvalEventId = undefined;
+        session.approvedDigest = undefined;
+        if (previousEnvelope) {
+          envelopes.delete(orderId);
+          quoteInvalidated = true;
+          void audit.log({ logicalOrderId: orderId, type: "quote.invalidated", actor: "system",
+            summary: `Quote ${previousEnvelope.digest.slice(0, 16)}… invalidated due to material intent change`,
+            inputDigest: previousEnvelope.digest, outputDigest: intentDigest(session.intent), decision: "block",
+            reasonCodes: ["material_change_refinement", "recommendation_result_invalidated"] });
+        }
       }
 
       // ── Acknowledge corrections naturally ──
-      const acknowledgement = acknowledgeChange(merged.corrections, merged.removals, session.intent);
+      const acknowledgement = materialChange ? acknowledgeChange(merged.corrections, merged.removals, session.intent) : null;
 
       // ── Route by action ──
       switch (merged.action) {
         case "restart":
+          envelopes.delete(orderId);
           session.dialogue = createDialogueMemory();
           session.intent = {};
+          session.lastRanking = undefined;
+          session.approvalEventId = undefined;
+          session.approvedDigest = undefined;
           return { kind: "restart", state: session.state };
 
         case "compare":
@@ -263,7 +294,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           return handleExplain(session, merged.requestedProductIds, audit, orderId);
 
         case "select":
-          return handleSelect(session, merged.requestedProductIds, merged.corrections, audit, orderId);
+          return handleSelect(session, merged.requestedProductIds, selectionBinding, audit, orderId);
 
         case "search":
         case "refine":
@@ -272,7 +303,24 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       // ── Cheaper request: grounded response with actual product and savings ──
       if (/\bcheaper\b|\bcheapest\b|\blower\s+price\b|\bless\s+expensive\b/.test(message.toLowerCase())) {
+        if (quoteInvalidated && session.state === "AWAITING_APPROVAL") setState(session, "QUOTED");
         return handleCheaper(session, audit, orderId, llm);
+      }
+
+      // A repeated constraint message is a no-op. Keep the server-issued
+      // result binding stable instead of manufacturing a new ranking.
+      if (!materialChange && (merged.action === "search" || merged.action === "refine") && isCurrentRecommendation(session) && session.lastRanking?.ranked) {
+        const ranking = session.lastRanking!;
+        const replyMessage = await composeShortlistMessage(session, ranking, undefined, llm);
+        syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
+        return {
+          kind: "shortlist",
+          message: replyMessage,
+          matches: ranking.matches,
+          fitScores: session.machineSpend?.fitScores,
+          state: session.state,
+          ...recommendationBinding(session),
+        };
       }
 
       // ── Search / Refine: rank products or ask clarification ──
@@ -282,27 +330,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
       }
 
-      const intent: PurchaseIntent = {
-        merchantId: SHOE_CATALOG.merchantId,
-        category: "running_shoes",
-        hardConstraints: {
-          maxAmountMinor: session.intent.maxAmountMinor ?? 1_000_000,
-          currency: "INR",
-          size: session.intent.size,
-          colour: session.intent.colour,
-          useCase: session.intent.useCase as PurchaseIntent["hardConstraints"]["useCase"],
-          mustBeReturnable: session.intent.mustBeReturnable,
-          deliverBy: session.intent.deliverBy,
-        },
-        softPreferences: [
-          { name: "distance", value: String(session.intent.distanceKm ?? 0), weight: 1 },
-          { name: "fit", value: session.intent.fit ?? "", weight: 1 },
-          { name: "cushioning", value: session.intent.cushioning ?? "", weight: 1 },
-        ],
-      };
-
+      const intent = buildPurchaseIntent(session);
       const ranking = rankProducts(intent, SHOE_CATALOG);
-      session.lastRanking = ranking;
+      recordRecommendation(session, ranking);
 
       if (!ranking.ranked) {
         setState(session, "CLARIFYING");
@@ -316,11 +346,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
       }
 
-      if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED") {
+      if (session.state === "AWAITING_APPROVAL" && quoteInvalidated) {
         setState(session, "QUOTED");
-      }
-      if (!quoteInvalidated) {
-        session.dialogue.quoteValid = true;
+      } else if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED") {
+        setState(session, "QUOTED");
       }
 
       // ── x402 fit-scoring spend policy ──
@@ -348,23 +377,23 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         fitScores: session.machineSpend?.fitScores,
         machineSpend: machineSpend ? { mock: machineSpend.mock, paymentIdentifier: machineSpend.paymentIdentifier, txHash: machineSpend.txHash, network: machineSpend.network, amount: machineSpend.amount } : undefined,
         state: session.state,
+        ...recommendationBinding(session),
       };
+      });
     },
 
-    async buildQuote(orderId, productId) {
+    async buildQuote(orderId, productId, selectionBinding) {
+      return withSessionLock(orderId, async () => {
       const session = sessions.get(orderId);
       if (!session) throw new Error("Unknown session");
-      const product = SHOE_CATALOG.products.find((p) => p.productId === productId);
-      if (!product) throw new Error(`Unknown product ${productId}`);
-      const size = session.intent.size;
-      if (!size) throw new Error("Size is required before quoting");
-      const variant = product.variants.find((v) => v.size === size);
-      if (!variant) {
-        throw new Error(`Size ${size} not available for ${product.name}`);
+
+      const selection = validateCurrentSelection(session, productId, selectionBinding);
+      if (!selection.ok) {
+        throw new QuoteValidationError(selection.message, selection.ranking.matches, selection.binding, productId, selection.reasonCodes);
       }
-      if (variant.inStock <= 0) {
-        throw new Error(`${product.name} in size ${size} is out of stock`);
-      }
+      const { product, variant } = selection;
+      const binding = selection.binding;
+      const size = session.intent.size!;
 
       const now = new Date();
       const shipping = estimateShipping(product.deliveryLeadDays, now.toISOString());
@@ -405,10 +434,20 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       const digest = envelopeDigest(envelope);
       const signature = signEnvelope(envelope, signingSecret);
-      envelopes.set(orderId, { envelope, digest, signature, issuedAt: now.toISOString() });
+      envelopes.set(orderId, {
+        envelope,
+        digest,
+        signature,
+        issuedAt: now.toISOString(),
+        recommendation: binding,
+        intentDigest: intentDigest(session.intent),
+      });
 
       session.dialogue.quoteProductId = productId;
       session.dialogue.quoteValid = true;
+      session.dialogue.quoteIntentVersion = binding.intentVersion;
+      session.dialogue.quoteRecommendationVersion = binding.recommendationVersion;
+      session.dialogue.quoteActionToken = binding.recommendationActionToken;
       setState(session, "AWAITING_APPROVAL");
       void audit.log({
         logicalOrderId: orderId,
@@ -423,14 +462,23 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         signature,
         state: session.state,
         approvalEventId: session.approvalEventId,
+        ...binding,
       };
+      });
     },
 
     async approve(orderId, digest) {
+      return withSessionLock(orderId, async () => {
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       const record = envelopes.get(orderId);
       if (!record) return { ok: false, state: session.state, error: "No envelope to approve" };
+
+      if (!session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
+        !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
+        record.intentDigest !== intentDigest(session.intent)) {
+        return { ok: false, state: session.state, error: "This quote is no longer active for the current intent" };
+      }
 
       if (session.approvalEventId && session.approvedDigest === digest) {
         return { ok: true, approvalEventId: session.approvalEventId, state: session.state };
@@ -459,13 +507,26 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         reasonCodes: ["approval_binds_hash"],
       });
       return { ok: true, approvalEventId, state: session.state };
+      });
     },
 
     async initiatePayment(orderId, rail) {
+      return withSessionLock(orderId, async () => {
       const session = sessions.get(orderId);
       if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
       const record = envelopes.get(orderId);
       if (!record) return { ok: false, state: session.state, error: "No envelope" };
+
+      if (!session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
+        !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
+        record.intentDigest !== intentDigest(session.intent)) {
+        return {
+          ok: false,
+          state: session.state,
+          error: "Payment blocked: this quote is no longer active for the current intent",
+          reasonCodes: ["quote_invalidated"],
+        };
+      }
 
       if (session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
         return { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected." };
@@ -547,6 +608,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         });
         return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
       }
+      });
     },
 
     async mockCapture(orderId) {
@@ -755,7 +817,14 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       const newDigest = envelopeDigest(candidate);
       const newSignature = signEnvelope(candidate, signingSecret);
-      envelopes.set(orderId, { envelope: candidate, digest: newDigest, signature: newSignature, issuedAt: new Date().toISOString() });
+       envelopes.set(orderId, {
+         envelope: candidate,
+         digest: newDigest,
+         signature: newSignature,
+         issuedAt: new Date().toISOString(),
+         recommendation: record.recommendation,
+         intentDigest: record.intentDigest,
+       });
       session.approvedDigest = undefined;
       session.approvalEventId = undefined;
       setState(session, "REAPPROVAL_REQUIRED");
@@ -901,6 +970,255 @@ function setState(session: Session, next: OrderState): void {
   session.state = next;
 }
 
+export class QuoteValidationError extends Error {
+  constructor(
+    message: string,
+    readonly matches: ProductMatch[],
+    readonly binding: RecommendationBinding,
+    readonly rejectedProductId: string,
+    readonly reasonCodes: string[],
+  ) {
+    super(message);
+    this.name = "QuoteValidationError";
+  }
+}
+
+type CurrentRecommendation = {
+  ranking: RankingResult;
+  binding: RecommendationBinding;
+};
+
+type SelectionValidation =
+  | {
+      ok: true;
+      product: (typeof SHOE_CATALOG.products)[number];
+      variant: (typeof SHOE_CATALOG.products)[number]["variants"][number];
+      binding: RecommendationBinding;
+    }
+  | {
+      ok: false;
+      message: string;
+      ranking: RankingResult;
+      binding: RecommendationBinding;
+      reasonCodes: string[];
+    };
+
+function hasIntentChanged(before: ParsedIntent, after: ParsedIntent): boolean {
+  const fields: (keyof ParsedIntent)[] = [
+    "size",
+    "colour",
+    "useCase",
+    "maxAmountMinor",
+    "mustBeReturnable",
+    "deliverBy",
+    "distanceKm",
+    "fit",
+    "cushioning",
+  ];
+  return fields.some((field) => before[field] !== after[field]);
+}
+
+function buildPurchaseIntent(session: Session): PurchaseIntent {
+  return {
+    merchantId: SHOE_CATALOG.merchantId,
+    category: "running_shoes",
+    hardConstraints: {
+      maxAmountMinor: session.intent.maxAmountMinor ?? 1_000_000,
+      currency: "INR",
+      size: session.intent.size,
+      colour: session.intent.colour,
+      useCase: session.intent.useCase as PurchaseIntent["hardConstraints"]["useCase"],
+      mustBeReturnable: session.intent.mustBeReturnable,
+      deliverBy: session.intent.deliverBy,
+    },
+    softPreferences: [
+      { name: "distance", value: String(session.intent.distanceKm ?? 0), weight: 1 },
+      { name: "fit", value: session.intent.fit ?? "", weight: 1 },
+      { name: "cushioning", value: session.intent.cushioning ?? "", weight: 1 },
+    ],
+  };
+}
+
+function recordRecommendation(session: Session, ranking: RankingResult): void {
+  session.lastRanking = ranking;
+  session.dialogue.recommendationVersion += 1;
+  session.dialogue.recommendationIntentVersion = session.dialogue.intentVersion;
+  session.dialogue.recommendationActionToken = newId("rec");
+}
+
+function recommendationBinding(session: Session): RecommendationBinding {
+  if (!isCurrentRecommendation(session)) {
+    throw new Error("No current recommendation result");
+  }
+  return {
+    intentVersion: session.dialogue.intentVersion,
+    recommendationVersion: session.dialogue.recommendationVersion,
+    recommendationActionToken: session.dialogue.recommendationActionToken!,
+  };
+}
+
+function isCurrentRecommendation(session: Session): boolean {
+  return Boolean(
+    session.lastRanking &&
+    session.dialogue.recommendationVersion > 0 &&
+    session.dialogue.recommendationIntentVersion === session.dialogue.intentVersion &&
+    session.dialogue.recommendationActionToken,
+  );
+}
+
+function sameRecommendationBinding(a: RecommendationBinding, b: RecommendationBinding): boolean {
+  return a.intentVersion === b.intentVersion &&
+    a.recommendationVersion === b.recommendationVersion &&
+    a.recommendationActionToken === b.recommendationActionToken;
+}
+
+function currentRecommendation(session: Session): CurrentRecommendation {
+  if (!isCurrentRecommendation(session)) {
+    const ranking = rankProducts(buildPurchaseIntent(session), SHOE_CATALOG);
+    recordRecommendation(session, ranking);
+    syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), ranking.missing.map((m) => m.name), "refresh", "");
+  }
+  return { ranking: session.lastRanking!, binding: recommendationBinding(session) };
+}
+
+function budgetLabel(maxAmountMinor: number): string {
+  return `₹${(maxAmountMinor / 100).toLocaleString("en-IN")}`;
+}
+
+function validateCurrentSelection(
+  session: Session,
+  productId: string,
+  suppliedBinding?: RecommendationBinding,
+): SelectionValidation {
+  const current = currentRecommendation(session);
+  const product = SHOE_CATALOG.products.find((candidate) => candidate.productId === productId);
+  const maxAmountMinor = session.intent.maxAmountMinor ?? 1_000_000;
+  const bindingMatches = !suppliedBinding || sameRecommendationBinding(suppliedBinding, current.binding);
+
+  if (!product) {
+    return {
+      ok: false,
+      message: `Unknown product: ${productId}. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["unknown_product"],
+    };
+  }
+
+  const variant = session.intent.size
+    ? product.variants.find((candidate) => candidate.size === session.intent.size)
+    : undefined;
+  const exceedsBudget = product.priceMinor > maxAmountMinor;
+  if (exceedsBudget) {
+    return {
+      ok: false,
+      message: `${product.name} no longer fits your ${budgetLabel(maxAmountMinor)} budget. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["budget_exceeded", ...(bindingMatches ? [] : ["stale_recommendation"])],
+    };
+  }
+  if (!bindingMatches) {
+    return {
+      ok: false,
+      message: `${product.name} is from an older recommendation. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["stale_recommendation", "recommendation_version_mismatch"],
+    };
+  }
+  if (!session.intent.size) {
+    return {
+      ok: false,
+      message: "Choose a size before selecting a shoe. I refreshed your options.",
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["size_required"],
+    };
+  }
+  if (!variant) {
+    return {
+      ok: false,
+      message: `${product.name} is not available in ${session.intent.size}. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["size_unavailable"],
+    };
+  }
+  if (variant.inStock <= 0) {
+    return {
+      ok: false,
+      message: `${product.name} in ${session.intent.size} is out of stock. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["out_of_stock"],
+    };
+  }
+  if (!current.ranking.matches.some((match) => match.product.productId === productId) ||
+    !session.dialogue.shownProductIds.includes(productId)) {
+    return {
+      ok: false,
+      message: `${product.name} is not in your current eligible recommendations. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["not_current_recommendation"],
+    };
+  }
+  const match = current.ranking.matches.find((candidate) => candidate.product.productId === productId)!;
+  if (match.eligibility.rejectionReasons.length > 0 ||
+    !match.eligibility.withinBudget || !match.eligibility.sizeAvailable ||
+    !match.eligibility.inStock || !match.eligibility.returnable || !match.eligibility.deliveryMet) {
+    return {
+      ok: false,
+      message: `${product.name} no longer satisfies your current requirements. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["eligibility_failed"],
+    };
+  }
+  if (session.intent.colour && !product.colour.includes(session.intent.colour)) {
+    return {
+      ok: false,
+      message: `${product.name} does not match your requested colour. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["colour_constraint_failed"],
+    };
+  }
+  if (session.intent.mustBeReturnable && !product.returnable) {
+    return {
+      ok: false,
+      message: `${product.name} is not returnable as required. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["returnability_constraint_failed"],
+    };
+  }
+  if (session.intent.deliverBy) {
+    const delivery = estimateShipping(product.deliveryLeadDays, new Date().toISOString());
+    if (delivery.deliverBy > session.intent.deliverBy) {
+      return {
+        ok: false,
+        message: `${product.name} cannot meet your delivery deadline. I refreshed your options.`,
+        ranking: current.ranking,
+        binding: current.binding,
+        reasonCodes: ["delivery_constraint_failed"],
+      };
+    }
+  }
+  if (product.category !== "running_shoes" || product.currency !== "INR") {
+    return {
+      ok: false,
+      message: `${product.name} is not a valid RunVista product. I refreshed your options.`,
+      ranking: current.ranking,
+      binding: current.binding,
+      reasonCodes: ["catalog_identity_failed"],
+    };
+  }
+
+  return { ok: true, product, variant, binding: current.binding };
+}
+
 /* ── AI-2 grounded action handlers ── */
 
 function handleCompare(
@@ -976,33 +1294,45 @@ function handleExplain(
 function handleSelect(
   session: Session,
   requestedIds: string[],
-  corrections: string[],
+  selectionBinding: RecommendationBinding | undefined,
   audit: ReturnType<typeof createAuditLedger>,
   orderId: string,
-): { kind: "select"; productId: string; state: OrderState } | { kind: "error"; message: string; state: OrderState } {
+): RespondResult {
   const productId = requestedIds[0];
   if (!productId) {
     return { kind: "error", message: "I couldn't identify which shoe you'd like to select.", state: session.state };
   }
-  const product = SHOE_CATALOG.products.find((p) => p.productId === productId);
-  if (!product) {
-    return { kind: "error", message: `Unknown product: ${productId}.`, state: session.state };
+
+  const selection = validateCurrentSelection(session, productId, selectionBinding);
+  if (!selection.ok) {
+    void audit.log({
+      logicalOrderId: orderId,
+      type: "action.select_rejected",
+      actor: "policy",
+      summary: `Selection rejected for ${productId}: ${selection.message}`,
+      inputDigest: intentDigest(session.intent),
+      decision: "block",
+      reasonCodes: selection.reasonCodes,
+    });
+    return {
+      kind: "error",
+      message: selection.message,
+      state: session.state,
+      matches: selection.ranking.matches,
+      ...selection.binding,
+      selectionRejected: true,
+      rejectedProductId: productId,
+    };
   }
-  const size = corrections.includes("size") ? session.intent.size : session.intent.size;
-  const variant = product.variants.find((v) => v.size === size);
-  if (!variant) {
-    return { kind: "error", message: `${product.name} is not available in ${size ?? "your selected size"}.`, state: session.state };
-  }
-  if (variant.inStock <= 0) {
-    return { kind: "error", message: `${product.name} in ${size} is out of stock.`, state: session.state };
-  }
+
+  const { product, variant, binding } = selection;
   session.dialogue.selectedProductId = productId;
   void audit.log({
     logicalOrderId: orderId, type: "action.select", actor: "agent",
-    summary: `Selected ${product.name} ${size}`,
+    summary: `Selected ${product.name} ${variant.size}`,
     inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["eligible_in_stock"],
   });
-  return { kind: "select", productId, state: session.state };
+  return { kind: "select", productId, message: `Selected ${product.name} ${variant.size}.`, state: session.state, ...binding };
 }
 
 function handleCheaper(
@@ -1011,7 +1341,12 @@ function handleCheaper(
   orderId: string,
   llm: LlmProvider,
 ): { kind: "cheaper"; currentBest: ProductMatch; cheaperOption: ProductMatch | null; message: string; state: OrderState } {
-  const ranking = session.lastRanking;
+  let ranking = session.lastRanking;
+  if (!ranking || !isCurrentRecommendation(session)) {
+    ranking = rankProducts(buildPurchaseIntent(session), SHOE_CATALOG);
+    recordRecommendation(session, ranking);
+    syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), ranking.missing.map((m) => m.name), "refine", session.message);
+  }
   if (!ranking || ranking.matches.length === 0) {
     return { kind: "cheaper", currentBest: { product: SHOE_CATALOG.products[0]!, score: 0, scoreNormalized: 0, role: "none", roleJustification: "", matchedRequirements: [], matchedPreferences: [], compromises: [], eligibility: { withinBudget: false, sizeAvailable: false, inStock: false, returnable: false, deliveryMet: false, rejectionReasons: [] }, colourMatched: false }, cheaperOption: null, message: "No products available to compare against.", state: session.state };
   }
@@ -1232,7 +1567,12 @@ async function composeShortlistMessage(
   llm: LlmProvider,
 ): Promise<string> {
   const best = ranking.matches[0];
-  if (!best) return "No products satisfy your constraints with current stock.";
+  if (!best) {
+    const budget = session.intent.maxAmountMinor;
+    return budget
+      ? `No products satisfy your ${budgetLabel(budget)} budget and current constraints.`
+      : "No products satisfy your constraints with current stock.";
+  }
   const spendNote = machineSpend
     ? ` Fit-scoring invoked under a pre-authorized ${machineSpend.amount} USDC x402 mandate — MOCK settlement; no real funds moved.`
     : "";

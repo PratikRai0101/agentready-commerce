@@ -165,8 +165,10 @@ describe("AI-4 public-handler integration", () => {
     const cheaper = await s.respond(session.logicalOrderId, "show me something cheaper");
     expect(cheaper.kind).toBe("cheaper");
 
-    const select = await s.respond(session.logicalOrderId, "Select Streak 4.");
+    const select = await s.respond(session.logicalOrderId, "Select Stride Lite.");
     expect(select.kind).toBe("select");
+    if (select.kind !== "select") throw new Error("expected select");
+    expect(select.productId).toBe("p_stride_lite");
   });
 
   it("React components do not independently calculate scores or roles", async () => {
