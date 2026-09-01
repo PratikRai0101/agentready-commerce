@@ -563,13 +563,14 @@ const send = useCallback(
                 <h2>Recommendations</h2>
               </div>
               <div className="recs-grid">
-                {matches.map((match, idx) => (
+                {matches.map((match) => (
                   <ProductCard
                     key={match.product.productId}
                     match={match}
                     fitScore={fitScores?.[match.product.productId]}
-                    roleLabel={CARD_ROLES[idx] ?? "Option"}
                     onSelect={chooseProduct}
+                    onExplain={(pid) => void send(`why ${match.product.name}?`)}
+                    onCompare={(pid) => void send(`compare it with ${match.product.name}`)}
                     disabled={busy}
                     showSelect={!quote}
                   />
