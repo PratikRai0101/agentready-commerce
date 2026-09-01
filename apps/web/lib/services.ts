@@ -235,8 +235,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       // ── Material change invalidation (pre-approval only) ──
       const materialChange = merged.corrections.length > 0 || merged.removals.length > 0 ||
         merged.proposedHardConstraints.some((c) => session.intent[c.name as keyof ParsedIntent] !== undefined);
-      if (materialChange && hadQuoteBefore && session.state === "QUOTED") {
+      let quoteInvalidated = false;
+      if (materialChange && hadQuoteBefore) {
         invalidateQuote(session.dialogue);
+        quoteInvalidated = true;
         void audit.log({ logicalOrderId: orderId, type: "quote.invalidated", actor: "system",
           summary: `Quote invalidated due to material change: corrections=[${merged.corrections.join(",")}] removals=[${merged.removals.join(",")}]`,
           inputDigest: intentDigest(session.intent), decision: "block", reasonCodes: ["material_change_refinement"] });
@@ -249,6 +251,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       switch (merged.action) {
         case "restart":
           session.dialogue = createDialogueMemory();
+          session.intent = {};
           return { kind: "restart", state: session.state };
 
         case "compare":
@@ -266,7 +269,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       }
 
       // ── Search / Refine: rank products or ask clarification ──
-      if (session.state !== "DRAFT" && session.state !== "CLARIFYING" && session.state !== "REAPPROVAL_REQUIRED" && session.state !== "QUOTED") {
+      const canRank = session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED" ||
+        (session.state === "AWAITING_APPROVAL" && materialChange);
+      if (!canRank) {
         return { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
       }
 
@@ -274,7 +279,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         merchantId: SHOE_CATALOG.merchantId,
         category: "running_shoes",
         hardConstraints: {
-          maxAmountMinor: session.intent.maxAmountMinor ?? 0,
+          maxAmountMinor: session.intent.maxAmountMinor ?? 1_000_000,
           currency: "INR",
           size: session.intent.size,
           colour: session.intent.colour,
@@ -304,7 +309,12 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
       }
 
-      setState(session, "QUOTED");
+      if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED") {
+        setState(session, "QUOTED");
+      }
+      if (!quoteInvalidated) {
+        session.dialogue.quoteValid = true;
+      }
       const machineSpend = !session.machineSpend && session.intent.fit
         ? runFitScoreSpend(session, machineResource, audit, orderId) : undefined;
       const replyMessage = await composeShortlistMessage(session, ranking, machineSpend, llm);
@@ -380,6 +390,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       const signature = signEnvelope(envelope, signingSecret);
       envelopes.set(orderId, { envelope, digest, signature, issuedAt: now.toISOString() });
 
+      session.dialogue.quoteProductId = productId;
+      session.dialogue.quoteValid = true;
       setState(session, "AWAITING_APPROVAL");
       void audit.log({
         logicalOrderId: orderId,
@@ -866,6 +878,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 }
 
 function setState(session: Session, next: OrderState): void {
+  if (session.state === next) return; // no-op if already in target state
   const result = transitionState(session.state, next);
   if (!result.ok) throw new Error(result.reason);
   session.state = next;
@@ -879,15 +892,23 @@ function handleCompare(
   audit: ReturnType<typeof createAuditLedger>,
   orderId: string,
 ): { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState } | { kind: "error"; message: string; state: OrderState } {
-  if (requestedIds.length < 2) {
-    return { kind: "error", message: "I need two valid product names to compare. Please specify which shoes.", state: session.state };
-  }
   const ranking = session.lastRanking;
   if (!ranking || ranking.matches.length === 0) {
     return { kind: "error", message: "No shortlist available to compare. Let me refine your search first.", state: session.state };
   }
-  const idA = requestedIds[0]!;
-  const idB = requestedIds[1]!;
+  // If only one product named (no "and"), compare against the top match
+  const ids = requestedIds.length >= 2
+    ? requestedIds.slice(0, 2)
+    : requestedIds.length === 1 && !session.message.toLowerCase().includes(" and ")
+      ? [ranking.matches[0]!.product.productId, requestedIds[0]!]
+      : requestedIds.length === 1
+        ? [requestedIds[0]!] // single product but can't resolve pair
+        : [];
+  if (ids.length < 2) {
+    return { kind: "error", message: "I need at least one product name to compare. Please specify which shoe.", state: session.state };
+  }
+  const idA = ids[0]!;
+  const idB = ids[1]!;
   const matchA = ranking.matches.find((m) => m.product.productId === idA);
   const matchB = ranking.matches.find((m) => m.product.productId === idB);
   if (!matchA || !matchB) {
@@ -933,10 +954,16 @@ function handleExplain(
     return { kind: "error", message: "No shortlist available to explain. Let me refine your search first.", state: session.state };
   }
   let target: ProductMatch | undefined;
-  if (requestedIds.length > 0) {
-    target = ranking.matches.find((m) => m.product.productId === requestedIds[0]);
+  const ids = requestedIds.length > 0 ? requestedIds : [];
+  if (ids.length > 0) {
+    target = ranking.matches.find((m) => m.product.productId === ids[0]);
   } else {
-    target = ranking.matches[0]; // "why this one?" defaults to the top match
+    // "why this one?" / "why not X?" → try message-based product name extraction
+    const messageProductIds = extractProductIdsFromMessage(session.message);
+    if (messageProductIds.length > 0) {
+      target = ranking.matches.find((m) => m.product.productId === messageProductIds[0]);
+    }
+    if (!target) target = ranking.matches[0]; // default: explain the top match
   }
   if (!target) {
     return { kind: "error", message: "That product is not in your current shortlist.", state: session.state };
@@ -1044,6 +1071,27 @@ function applyInterpretation(session: Session, merged: StructuredInterpretation)
 
 function countApplied(merged: StructuredInterpretation): number {
   return merged.proposedHardConstraints.length + merged.proposedSoftPreferences.length + merged.removals.length;
+}
+
+const PRODUCT_NAME_ALIASES: Record<string, string[]> = {
+  p_streak_4: ["streak 4", "streak4", "streak"],
+  p_vista_max: ["max cushion", "vista max", "maxcushion"],
+  p_stride_lite: ["stride lite", "stride"],
+  p_trail_rock: ["trail rock"],
+  p_gym_pace: ["gym pace"],
+  p_casual_day: ["everyday", "casual day"],
+};
+
+function extractProductIdsFromMessage(message: string): string[] {
+  const lower = message.toLowerCase();
+  const found: string[] = [];
+  for (const product of SHOE_CATALOG.products) {
+    const aliases = PRODUCT_NAME_ALIASES[product.productId] ?? [product.name.toLowerCase()];
+    for (const alias of aliases) {
+      if (lower.includes(alias)) { found.push(product.productId); break; }
+    }
+  }
+  return found.slice(0, 5);
 }
 
 function servicesReconcileHeld(

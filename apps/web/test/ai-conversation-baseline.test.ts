@@ -410,7 +410,7 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     expect(result.kind).toBe("shortlist");
   });
 
-  it("refinement after quoting is rejected (defect L3)", async () => {
+  it("refinement before approval re-ranks (AI-2: L3 fixed)", async () => {
     const services = getServices(env, { forceMock: true, llm: DISABLED_LLM });
     const session = startSession(services);
     await services.respond(session.logicalOrderId, "I need black shoes under ₹5,000");
@@ -418,9 +418,9 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     await services.respond(session.logicalOrderId, "road");
     await services.buildQuote(session.logicalOrderId, "p_streak_4");
     const result = await services.respond(session.logicalOrderId, "actually size 10");
-    expect(result.kind).toBe("error");
-    if (result.kind !== "error") throw new Error("expected error");
-    expect(result.message).toContain("does not accept");
+    expect(result.kind).toBe("shortlist");
+    if (result.kind !== "shortlist") throw new Error("expected shortlist");
+    expect(result.matches.every((m) => m.product.variants.some((v) => v.size === "UK 10"))).toBe(true);
   });
 });
 

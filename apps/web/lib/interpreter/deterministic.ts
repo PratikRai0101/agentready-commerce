@@ -95,7 +95,9 @@ export function deterministicInterpretation(
   if (parsed.distanceKm !== undefined) proposedSoft.push({ name: "distanceKm", value: parsed.distanceKm, evidence: evidenceFor(message, `${parsed.distanceKm}K`) });
 
   // "Show me something cheaper" → deterministic budget reduction (app code, not LLM).
-  if (/\bcheaper\b|\bcheapest\b|\blower\s+price\b|\bless\s+expensive\b/.test(lower)) {
+  // This is a refine action with explicit budget reduction.
+  const isCheaperRequest = /\bcheaper\b|\bcheapest\b|\blower\s+price\b|\bless\s+expensive\b/.test(lower);
+  if (isCheaperRequest) {
     const currentBudget = currentIntent.maxAmountMinor ?? 500_000;
     const reduced = Math.max(10_000, Math.round(currentBudget * 0.8));
     proposedHard.push({ name: "maxAmountMinor", value: reduced, evidence: evidenceFor(message, "cheaper") });
@@ -108,7 +110,7 @@ export function deterministicInterpretation(
     action = "restart";
   } else if (/\bcompare\b|\bversus\b|\bvs\b/.test(lower) && productIds.length >= 1) {
     action = "compare";
-  } else if (/\bwhy\s+this\b|\bwhy\s+that\b|\bwhy\s+the\b|\bexplain\b/.test(lower)) {
+  } else if (/\bwhy\s+(?:not|this|that|the)\b|\bwhy\s+\w+\b|\bexplain\b|\bwhat\s+am\s+i\s+compromising\b/.test(lower)) {
     action = "explain";
   } else if (/\b(?:select|pick|choose)\b/.test(lower) && productIds.length >= 1) {
     action = "select";
