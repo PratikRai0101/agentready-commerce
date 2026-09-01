@@ -371,8 +371,15 @@ export default function HomePage() {
           }
           if (typeof data.intentVersion === "number") setIntentVersion(data.intentVersion);
           setOrderState(data.state);
-          // Invalidate old quote/approval visuals when material change occurred
-          if (data.state !== "AWAITING_APPROVAL") setQuote(null);
+          // Atomically update cards: replace matches, binding, fitScores
+          setMatches(data.matches ?? []);
+          if (data.recommendationBinding) setRecommendationBinding(data.recommendationBinding);
+          if (data.fitScores) setFitScores(data.fitScores);
+          else setFitScores(null);
+          // Clear stale quote/selection when material change occurred
+          if (data.state !== "AWAITING_APPROVAL") {
+            setQuote(null);
+          }
           pushAgent("Updated your requirements. Here are your refreshed options.");
           void refreshTimeline(orderId);
         } else {

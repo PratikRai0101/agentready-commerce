@@ -104,7 +104,7 @@ export type AppServices = {
   findSessionByExternalOrderId(orderIdExternal: string): Session | undefined;
   reset(): void;
   policyCheck(orderId: string, rail: string, candidate?: CommerceEnvelope): { allow: boolean; reasonCodes: string[] };
-  intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; error?: string; reasonCodes?: string[] }>;
+  intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; matches?: ProductMatch[]; recommendationBinding?: RecommendationBinding; fitScores?: Record<string, { fitScore: number; note: string }>; error?: string; reasonCodes?: string[] }>;
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
   coordinator: OperationCoordinator;
@@ -1361,11 +1361,19 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           reasonCodes: ["intent_patch_applied"],
         });
 
+        const freshBinding = recommendationBinding(session);
+        const fitScoreMap = session.machineSpend?.fitScores
+          ? Object.fromEntries(session.machineSpend.fitScores.map((f) => [f.productId, { fitScore: f.fitScore, note: f.note }]))
+          : undefined;
+
         return {
           ok: true,
           state: session.state,
           parsedIntent: { ...session.intent },
           intentVersion: session.dialogue.intentVersion,
+          matches: ranking.ranked ? ranking.matches : [],
+          recommendationBinding: freshBinding,
+          fitScores: fitScoreMap,
         };
       });
     },

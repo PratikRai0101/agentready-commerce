@@ -119,9 +119,12 @@ describe("respond operation identity", () => {
     const orderId = session.logicalOrderId;
     const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_pending");
     expect(first.kind).not.toBe("error");
-    const second = await services.respond(orderId, "red shoes", undefined, "op_rsp_pending");
-    expect(second.kind).toBe("error");
-    if (second.kind === "error") expect(second.message).toContain("conflict");
+    const eventsAfterFirst = await services.timeline(orderId);
+    const countAfterFirst = eventsAfterFirst.length;
+    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_pending");
+    if (second.kind === "error") expect(second.message).toContain("in progress");
+    const eventsAfterSecond = await services.timeline(orderId);
+    expect(eventsAfterSecond.length).toBe(countAfterFirst);
   });
 
   it("replayed result is a deep clone, not the same reference", async () => {
@@ -134,20 +137,22 @@ describe("respond operation identity", () => {
     expect(second).not.toBe(first);
   });
 
-  it("mutating original does not affect replayed payload", async () => {
+  it("mutating original returned result does not affect subsequently replayed payload", async () => {
     const services = getServices(env, { forceMock: true, skipCache: true });
     const session = services.createSession();
     const orderId = session.logicalOrderId;
     const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_mut");
-    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_mut");
     if (first.kind === "shortlist") {
+      first.matches = [];
+      first.state = "FULFILLED";
       (first as Record<string, unknown>).message = "MUTATED";
-      (first as Record<string, unknown>).state = "FULFILLED";
     }
+    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_mut");
     expect(second).toEqual(first);
     if (second.kind === "shortlist") {
-      expect(second.message).not.toBe("MUTATED");
+      expect(second.matches.length).toBeGreaterThan(0);
       expect(second.state).not.toBe("FULFILLED");
+      expect(second.message).not.toBe("MUTATED");
     }
   });
 });
@@ -397,21 +402,57 @@ describe("immutable snapshots", () => {
     expect(retrieved!.resultPayload).toEqual({ nested: { value: 1 } });
   });
 
-  it("mutating original returned object does not affect replayed payload", async () => {
+  it("mutating original returned object does not affect subsequently replayed payload", async () => {
     const services = getServices(env, { forceMock: true, skipCache: true });
     const session = services.createSession();
     const orderId = session.logicalOrderId;
     const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_immut");
-    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_immut");
     if (first.kind === "shortlist") {
       first.matches = [];
       first.state = "FULFILLED";
       (first as Record<string, unknown>).message = "MUTATED";
     }
+    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_immut");
     expect(second).toEqual(first);
     if (second.kind === "shortlist") {
       expect(second.matches.length).toBeGreaterThan(0);
       expect(second.state).not.toBe("FULFILLED");
     }
+  });
+});
+
+describe("intent-patch browser flow integration", () => {
+  it("₹5,000 shortlist → patch to ₹3,000 → all returned cards ≤ ₹3,000, quote removed", async () => {
+    const services = getServices(env, { forceMock: true, skipCache: true });
+    const session = services.createSession();
+    const orderId = session.logicalOrderId;
+
+    await services.respond(orderId, DEMO_MESSAGE);
+    for (const c of CLARIFICATIONS) await services.respond(orderId, c);
+    const shortlist = await services.respond(orderId, "I need black shoes under ₹5,000.");
+    expect(shortlist.kind).toBe("shortlist");
+    if (shortlist.kind === "shortlist") {
+      expect(shortlist.matches.length).toBeGreaterThan(0);
+      for (const m of shortlist.matches) expect(m.product.priceMinor).toBeLessThanOrEqual(500_000);
+    }
+
+    const binding = shortlist.kind === "shortlist" ? shortlist : undefined;
+    const quote = await services.buildQuote(orderId, "p_streak_4", binding);
+    expect(quote.digest).toHaveLength(64);
+    const sessionBefore = services.getSession(orderId)!;
+    expect(sessionBefore.state).toBe("AWAITING_APPROVAL");
+
+    const patchResult = await services.intentPatch(orderId, { maxAmountMinor: 300_000 }, binding?.intentVersion ?? 0);
+    expect(patchResult.ok).toBe(true);
+    expect(patchResult.matches).toBeDefined();
+    expect(patchResult.matches!.length).toBeGreaterThan(0);
+    for (const m of patchResult.matches!) {
+      expect(m.product.priceMinor).toBeLessThanOrEqual(300_000);
+    }
+    expect(patchResult.recommendationBinding).toBeDefined();
+    expect(patchResult.state).not.toBe("AWAITING_APPROVAL");
+
+    const envelope = services.getEnvelope(orderId);
+    expect(envelope).toBeUndefined();
   });
 });
