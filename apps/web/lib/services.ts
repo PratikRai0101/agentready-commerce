@@ -316,7 +316,17 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       if (!quoteInvalidated) {
         session.dialogue.quoteValid = true;
       }
-      const machineSpend = !session.machineSpend && session.intent.fit
+
+      // ── x402 fit-scoring spend policy ──
+      // Only invoke when: (1) fit preference exists and could materially
+      // distinguish candidates; (2) at least 2 eligible candidates remain;
+      // (3) no duplicate spend on the same intent digest.
+      const envelopeHash = intentDigest(session.intent);
+      const shouldSpend = session.intent.fit
+        && !session.machineSpend
+        && ranking.matches.length >= 2
+        && !machineResource.hasProcessed(envelopeHash);
+      const machineSpend = shouldSpend
         ? runFitScoreSpend(session, machineResource, audit, orderId) : undefined;
       const replyMessage = await composeShortlistMessage(session, ranking, machineSpend, llm);
       void audit.log({ logicalOrderId: orderId, type: "intent.shortlist_ranked", actor: "agent",
@@ -1120,16 +1130,18 @@ function runFitScoreSpend(
     logicalOrderId: orderId,
     type: "machine.paid_resource",
     actor: "agent",
-    summary: `Paid ${outcome.resource.resourceName} (${outcome.settlement.amount} USDC) via x402 v2 on Solana Devnet — MOCK demo settlement`,
+    summary: `Paid ${outcome.resource.resourceName} (${outcome.settlement.amount} USDC) via x402 v2 on Solana Devnet — MOCK demo settlement. Pre-authorized by demo mandate for fit-scoring resource.`,
     externalReferences: {
       network: outcome.settlement.network,
       paymentIdentifier,
       txHash: outcome.settlement.transactionHash ?? "",
       payee: DEFAULT_MACHINE_SPEND.payeeWallet,
       mock: "true",
+      purpose: "fit_scoring",
+      mandateEvidence: "demo_preauthorized_0.01_USDC",
     },
     decision: "allow",
-    reasonCodes: ["x402_mock_settlement_verified", "machine_tool_spend"],
+    reasonCodes: ["x402_mock_settlement_verified", "machine_tool_spend", "demo_preauthorized"],
   });
   return {
     mock: true,
