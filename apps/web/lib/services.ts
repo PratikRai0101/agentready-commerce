@@ -64,8 +64,8 @@ export type EnvelopeRecord = {
 
 export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
-  | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
-  | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string }
+  | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
+  | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
   | { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState }
   | { kind: "cheaper"; currentBest: ProductMatch; cheaperOption: ProductMatch | null; message: string; state: OrderState }
@@ -319,6 +319,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           matches: ranking.matches,
           fitScores: session.machineSpend?.fitScores,
           state: session.state,
+          parsedIntent: { ...session.intent },
           ...recommendationBinding(session),
         };
       }
@@ -377,6 +378,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         fitScores: session.machineSpend?.fitScores,
         machineSpend: machineSpend ? { mock: machineSpend.mock, paymentIdentifier: machineSpend.paymentIdentifier, txHash: machineSpend.txHash, network: machineSpend.network, amount: machineSpend.amount } : undefined,
         state: session.state,
+        parsedIntent: { ...session.intent },
         ...recommendationBinding(session),
       };
       });
@@ -1322,6 +1324,7 @@ function handleSelect(
       ...selection.binding,
       selectionRejected: true,
       rejectedProductId: productId,
+      parsedIntent: { ...session.intent },
     };
   }
 

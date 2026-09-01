@@ -29,7 +29,7 @@ type MachineSpendInfo = {
 
 type ChatMessage = { role: "user" | "agent"; text: string };
 
-const SUGGESTED = "I need black shoes under \u20B95,000.";
+const SUGGESTED = "I need black shoes under ₹5,000.";
 
 const STEPS = ["Preferences", "Recommendations", "Review", "Approval", "Payment", "Receipt"];
 
@@ -55,7 +55,7 @@ function stripScores(text: string): string {
 
 function maskId(id: string): string {
   if (id.length <= 12) return id;
-  return id.slice(0, 6) + "\u2026" + id.slice(-4);
+  return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
 function humaniseEvent(event: AuditEvent): string {
@@ -74,7 +74,7 @@ function humaniseEvent(event: AuditEvent): string {
   if (s.includes("approval.bound")) return "Approval bound to envelope";
   if (s.includes("fulfilment")) return "Fulfilment completed";
   if (s.includes("webhook")) return "Webhook received";
-  return s.length > 80 ? s.slice(0, 77) + "\u2026" : s;
+  return s.length > 80 ? s.slice(0, 77) + "…" : s;
 }
 
 export default function HomePage() {
@@ -143,7 +143,7 @@ export default function HomePage() {
     setOrderState(data.state);
     setRails(data.rails ?? []);
     setIndicators(data.indicators ?? { razorpay: "mock", x402: "mock", llm: "disabled" });
-    pushAgent("Hi, I\u2019m the RunVista assistant. Tell me what you\u2019re looking for \u2014 e.g. \u201cblack running shoes under \u20B95,000\u201d.");
+    pushAgent("Hi, I’m the RunVista assistant. Tell me what you’re looking for — e.g. “black running shoes under ₹5,000”.");
     setBusy(false);
   }, [pushAgent]);
 
@@ -203,7 +203,7 @@ export default function HomePage() {
       setQuestions([]);
       setQuickReplies([]);
       setBusy(true);
-      setLoadingMsg("Interpreting your message\u2026");
+      setLoadingMsg("Interpreting your message…");
       setErrorMsg(null);
       try {
         const response = await fetch("/api/respond", {
@@ -241,13 +241,16 @@ export default function HomePage() {
           if (data.state !== "AWAITING_APPROVAL") setQuote(null);
           setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
           setMachineSpend(data.machineSpend ?? null);
-          // Extract intent from matches
-          if (data.matches?.length > 0) {
-            const m = data.matches[0].product;
-            newFields.push({ key: "size", label: "Size", value: m.variants?.[0]?.size ?? "", kind: "requirement", editable: true });
-            newFields.push({ key: "budget", label: "Budget", value: `₹${(data.matches[0].product.priceMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
-            newFields.push({ key: "fit", label: m.fit, value: m.fit, kind: "preference", editable: true });
-            newFields.push({ key: "cushioning", label: m.cushioning, value: m.cushioning, kind: "preference", editable: true });
+          // Construct intent chips from actual parsed intent, not product data
+          const intent = data.parsedIntent;
+          if (intent) {
+            if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
+            if (intent.maxAmountMinor) newFields.push({ key: "budget", label: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
+            if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
+            if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
+            if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
+            if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
           }
         } else if (data.kind === "error") {
           pushAgent(data.message);
@@ -260,6 +263,17 @@ export default function HomePage() {
               recommendationActionToken: data.recommendationActionToken,
             });
             setQuote(null);
+            // Reconstruct intent chips from parsed intent when available
+            if (data.parsedIntent) {
+              const intent = data.parsedIntent;
+              if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
+              if (intent.maxAmountMinor) newFields.push({ key: "budget", label: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+              if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
+              if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
+              if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
+              if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
+              if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
+            }
           }
         } else if (data.kind === "compare") {
           const { productA, productB, facts } = data;
@@ -325,7 +339,7 @@ export default function HomePage() {
     const data = await response.json();
     setOrderState(data.state);
     if (data.ok) {
-      pushAgent(`Approval bound to envelope hash ${quote.digest.slice(0, 16)}\u2026`);
+      pushAgent(`Approval bound to envelope hash ${quote.digest.slice(0, 16)}…`);
       setQuote((prev) => (prev ? { ...prev, approvalEventId: data.approvalEventId } : prev));
     } else {
       pushAgent(`Approval failed: ${data.error}`);
@@ -353,7 +367,7 @@ export default function HomePage() {
       if (isMock) {
         pushAgent("Razorpay order created. Complete the test payment to capture.");
       } else {
-        pushAgent("Opening Razorpay Checkout\u2026");
+        pushAgent("Opening Razorpay Checkout…");
         openRazorpayCheckout(
           data.attempt?.checkoutPayload,
           async (response) => {
@@ -397,7 +411,7 @@ export default function HomePage() {
       setOrderState(data.state);
       setPaymentIds((prev) => ({ ...prev, paymentId: externalPaymentId, signature }));
       if (data.ok) {
-        pushAgent(`Payment verified. Order is now PAID_VERIFIED \u2014 fulfilment may begin.`);
+        pushAgent(`Payment verified. Order is now PAID_VERIFIED — fulfilment may begin.`);
       } else {
         pushAgent(`Payment verification failed: ${data.error}`);
       }
@@ -503,7 +517,7 @@ export default function HomePage() {
 
   const subheading = receipt
     ? "Thank you for your purchase."
-    : matches ? "Based on your requirements and preferences." : "Tell me how you run and I\u2019ll shortlist honest options.";
+    : matches ? "Based on your requirements and preferences." : "Tell me how you run and I’ll shortlist honest options.";
 
   /* ── Group ranking events: keep only the last one ── */
   const displayTimeline = (() => {
@@ -554,7 +568,7 @@ export default function HomePage() {
             ))}
             {questions.length > 0 && (
               <div className="msg agent">
-                {questions.length === 1 ? questions[0] : questions.join(" \u00B7 ")}
+                {questions.length === 1 ? questions[0] : questions.join(" · ")}
               </div>
             )}
             {hasQuickReplies && (
@@ -573,7 +587,7 @@ export default function HomePage() {
                 className="composer-input"
                 type="text"
                 value={input}
-                placeholder={messages.length === 0 ? SUGGESTED : "Ask about a shoe, compare, or refine\u2026"}
+                placeholder={messages.length === 0 ? SUGGESTED : "Ask about a shoe, compare, or refine…"}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void send(input || SUGGESTED);
@@ -647,7 +661,7 @@ export default function HomePage() {
           {!matches && !receipt && messages.length > 0 && (
             <div className="empty-state">
               <h3>Recommendations appear here</h3>
-              <p>Answer the question above and I\u2019ll shortlist your best matches.</p>
+              <p>Answer the question above and I’ll shortlist your best matches.</p>
             </div>
           )}
 
@@ -739,13 +753,13 @@ function ReceiptView({
         <span style={{ color: "var(--text-soft)" }}>Size</span>
         <span>{item?.variant?.size}</span>
         <span style={{ color: "var(--text-soft)" }}>Subtotal</span>
-        <span>{"\u20B9"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
+        <span>{"₹"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Shipping</span>
-        <span>{"\u20B9"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
+        <span>{"₹"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Total</span>
-        <span style={{ fontWeight: 600 }}>{"\u20B9"}{(envelope.totalMinor / 100).toFixed(2)}</span>
+        <span style={{ fontWeight: 600 }}>{"₹"}{(envelope.totalMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Payment</span>
-        <span>{paymentIds?.paymentId ? `Verified \u2014 ${maskId(paymentIds.paymentId)}` : "Verified"}</span>
+        <span>{paymentIds?.paymentId ? `Verified — ${maskId(paymentIds.paymentId)}` : "Verified"}</span>
         <span style={{ color: "var(--text-soft)" }}>Return</span>
         <span>Returnable within 14 days, unworn</span>
       </div>
@@ -798,7 +812,7 @@ function ApprovalPanel({
   const { envelope } = quote;
   return (
     <div className="demo-panel" style={{ borderLeftColor: quote.approvalEventId ? "var(--good)" : "var(--accent)", borderLeftWidth: 3 }}>
-      <h3>Order review {quote.approvalEventId ? "\u2014 approved" : ""}</h3>
+      <h3>Order review {quote.approvalEventId ? "— approved" : ""}</h3>
       <div style={{ fontSize: 13, marginBottom: 8 }}>
         {envelope.items[0]?.variant?.size} {envelope.items.map((item) => item.sku).join(", ")}
       </div>
@@ -808,11 +822,11 @@ function ApprovalPanel({
         <span style={{ color: "var(--text-soft)" }}>Quantity</span>
         <span>{envelope.items[0]?.quantity}</span>
         <span style={{ color: "var(--text-soft)" }}>Subtotal</span>
-        <span>{"\u20B9"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
+        <span>{"₹"}{(envelope.subtotalMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Shipping</span>
-        <span>{"\u20B9"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
+        <span>{"₹"}{(envelope.shippingMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Total</span>
-        <span style={{ fontWeight: 600 }}>{"\u20B9"}{(envelope.totalMinor / 100).toFixed(2)}</span>
+        <span style={{ fontWeight: 600 }}>{"₹"}{(envelope.totalMinor / 100).toFixed(2)}</span>
         <span style={{ color: "var(--text-soft)" }}>Envelope hash</span>
         <code style={{ fontFamily: "var(--mono)", fontSize: 11, overflowWrap: "anywhere" }}>{quote.digest}</code>
         <span style={{ color: "var(--text-soft)" }}>Expires</span>
@@ -1003,7 +1017,7 @@ function TrustDrawer({
             <div className="drawer-box">
               {hasCaptured ? (
                 <div className="drawer-status">
-                  {"\u2713"} Captured &mdash; {"\u20B9"}{(quote!.envelope.totalMinor / 100).toFixed(2)} {quote!.envelope.currency}
+                  {"✓"} Captured &mdash; {"₹"}{(quote!.envelope.totalMinor / 100).toFixed(2)} {quote!.envelope.currency}
                 </div>
               ) : quote?.approvalEventId ? (
                 <div style={{ fontSize: 13, color: "var(--good)" }}>Approved &mdash; awaiting capture</div>
@@ -1044,15 +1058,15 @@ function TrustDrawer({
                   </div>
                   <div className="drawer-kv">
                     <span className="label">Subtotal</span>
-                    <span className="value">{"\u20B9"}{(quote.envelope.subtotalMinor / 100).toFixed(2)}</span>
+                    <span className="value">{"₹"}{(quote.envelope.subtotalMinor / 100).toFixed(2)}</span>
                   </div>
                   <div className="drawer-kv">
                     <span className="label">Shipping</span>
-                    <span className="value">{"\u20B9"}{(quote.envelope.shippingMinor / 100).toFixed(2)}</span>
+                    <span className="value">{"₹"}{(quote.envelope.shippingMinor / 100).toFixed(2)}</span>
                   </div>
                   <div className="drawer-kv">
                     <span className="label">Total</span>
-                    <span className="value" style={{ fontWeight: 600 }}>{"\u20B9"}{(quote.envelope.totalMinor / 100).toFixed(2)}</span>
+                    <span className="value" style={{ fontWeight: 600 }}>{"₹"}{(quote.envelope.totalMinor / 100).toFixed(2)}</span>
                   </div>
                   <div className="drawer-kv">
                     <span className="label">Return</span>
@@ -1091,7 +1105,7 @@ function TrustDrawer({
           {/* 4. Technical details (expandable) */}
           <div className="drawer-section">
             <button className="drawer-tech-toggle" type="button" onClick={onToggleTech}>
-              4 &middot; Technical details <span style={{ marginLeft: 4 }}>{techExpanded ? "\u25B2" : "\u25BC"}</span>
+              4 &middot; Technical details <span style={{ marginLeft: 4 }}>{techExpanded ? "▲" : "▼"}</span>
             </button>
             {techExpanded && (
               <div className="drawer-box" style={{ marginTop: 8 }}>
@@ -1116,7 +1130,7 @@ function TrustDrawer({
                     <div style={{ fontSize: 12, overflowWrap: "anywhere" }}>{event.summary}</div>
                     {event.externalReferences && (
                       <div className="mono" style={{ fontSize: 10, marginTop: 2, overflowWrap: "anywhere" }}>
-                        {Object.entries(event.externalReferences).map(([k, v]) => `${k}: ${maskId(String(v))}`).join(" \u00B7 ")}
+                        {Object.entries(event.externalReferences).map(([k, v]) => `${k}: ${maskId(String(v))}`).join(" · ")}
                       </div>
                     )}
                   </div>

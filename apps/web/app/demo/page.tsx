@@ -117,7 +117,7 @@ export default function DemoLabPage() {
     const res = await fetch("/api/respond", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId, message: "I need black shoes under \u20B95,000." }),
+      body: JSON.stringify({ orderId: session.orderId, message: "I need black shoes under ₹5,000." }),
     });
     const data = await res.json();
     setNotice(`Duplicate request: state ${data.state}, kind ${data.kind}`);
@@ -238,7 +238,7 @@ export default function DemoLabPage() {
                     <div className="ev-detail">{event.summary}</div>
                     {event.externalReferences && (
                       <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
-                        {Object.entries(event.externalReferences).map(([k, v]) => `${k}: ${v}`).join(" \u00B7 ")}
+                        {Object.entries(event.externalReferences).map(([k, v]) => `${k}: ${v}`).join(" · ")}
                       </div>
                     )}
                   </div>
@@ -257,7 +257,7 @@ export default function DemoLabPage() {
             </div>
             <div className="provider-row">
               <span className="prov-name">x402 / Solana</span>
-              <span className="prov-detail">demo settlement &middot; tx_mock_\u2026</span>
+              <span className="prov-detail">demo settlement &middot; tx_mock_…</span>
               <span className="prov-mode mock">MOCK</span>
             </div>
             <div className="provider-row">

@@ -116,7 +116,7 @@ export function acknowledgeChange(
   }
   for (const field of removals) {
     if (field === "colour") parts.push("Black is no longer required.");
-    else if (field === "cushioning") parts.push("I\u2019ve removed cushioning as a preference.");
+    else if (field === "cushioning") parts.push("I’ve removed cushioning as a preference.");
     else if (field === "fit") parts.push("Fit preference removed.");
     else parts.push(`${field} removed.`);
   }

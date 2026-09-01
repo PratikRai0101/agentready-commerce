@@ -530,6 +530,16 @@ body {
   display: block;
 }
 
+.product-card-img-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.product-card-action-why {
+  white-space: nowrap;
+}
+
 .product-card-body {
   padding: 14px 16px;
   display: flex;

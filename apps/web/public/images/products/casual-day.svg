@@ -1,0 +1,6 @@
+<svg viewBox="0 0 432 270" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="432" height="270" fill="#EDE4D8"/>
+<path d="M180 120C180 100 200 80 220 80C240 80 260 95 270 110C280 95 300 85 320 90C340 95 350 115 345 130C340 145 320 155 300 150L280 145C275 155 265 160 255 160H200C185 160 180 145 180 135V120Z" fill="#C85C3B" opacity="0.7"/>
+<path d="M140 170L160 155L180 165L220 140L260 155L300 145L340 160L360 175" stroke="#A94A2E" stroke-width="2" stroke-linecap="round"/>
+<text x="216" y="210" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#574E46">RunVista</text>
+</svg>

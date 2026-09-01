@@ -30,7 +30,7 @@ export function LoadingIndicator({ busy, error, onRetry }: Props) {
         <span className="loading-dots" aria-hidden="true">
           <span className="dot" /><span className="dot" /><span className="dot" />
         </span>
-        <span className="loading-text">Thinking\u2026</span>
+        <span className="loading-text">Thinking…</span>
       </div>
     );
   }
