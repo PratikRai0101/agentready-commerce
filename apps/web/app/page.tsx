@@ -8,6 +8,7 @@ import { RunVistaBrand } from "./components/RunVistaBrand";
 import { ProductCard } from "./components/ProductCard";
 import { IntentPanel, type IntentField } from "./components/IntentPanel";
 import { LoadingIndicator } from "./components/LoadingIndicator";
+import { ProviderStatus } from "./components/ProviderStatus";
 
 type QuoteResult = {
   envelope: CommerceEnvelope;
@@ -59,7 +60,8 @@ function maskId(id: string): string {
 function humaniseEvent(event: AuditEvent): string {
   const s = event.summary;
   if (s.includes("Ranked 3 products for")) return "Recommendations ranked";
-  if (s.includes("Paid RunVista Premium Fit-Scoring API")) return "Fit-scoring API call (x402)";
+  if (s.includes("Fit-scoring invoked")) return "Fit-scoring invoked (x402 MOCK — no real funds moved)";
+  if (s.includes("Paid RunVista Premium Fit-Scoring API")) return "Fit-scoring invoked (x402 MOCK — no real funds moved)";
   if (s.includes("Session created")) return "Session started";
   if (s.includes("Got it")) {
     const detail = s.replace(/^Got it\s*[—–-]\s*/, "").replace(/\.\s*Before I shortlist.*$/, "").replace(/\.\s*One more detail.*$/, "").trim();
@@ -464,6 +466,7 @@ const send = useCallback(
         <RunVistaBrand />
         <nav className="topbar-nav" aria-label="Main navigation">
           <span className="active">Shop</span>
+          <ProviderStatus providerStatus={indicators.llm === "disabled" ? "deterministic" : "ai-assisted"} />
           <button type="button" onClick={() => setDrawerOpen(true)} className="trust-badge">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M8 1L2 4v4c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V4L8 1z" stroke="currentColor" strokeWidth="1.5" fill="none" />

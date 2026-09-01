@@ -1208,6 +1208,38 @@ body {
   color: rgba(255, 255, 255, 0.7);
 }
 
+/* ─── AI-4 Provider Status ─── */
+
+.provider-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+}
+
+.provider-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.provider-dot.ai-assisted {
+  background: var(--good);
+}
+
+.provider-dot.deterministic {
+  background: var(--accent);
+}
+
+.provider-label {
+  line-height: 1;
+}
+
 /* ─── AI-4 Loading Indicator ─── */
 
 .loading-indicator {
