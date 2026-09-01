@@ -21,7 +21,7 @@ const DISABLED_LLM: LlmProvider = {
     return null;
   },
   async interpret() {
-    return null;
+    return { ok: false, reason: "disabled" };
   },
 };
 
@@ -376,25 +376,28 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     expect(corrected.matches.every((m) => m.product.variants.some((v) => v.size === "UK 10"))).toBe(true);
   });
 
-  it("'compare' follow-up does not produce a compare action (defect L4)", async () => {
+  it("'compare' follow-up is interpreted as a compare action (AI-1)", async () => {
     const services = getServices(env, { forceMock: true, llm: DISABLED_LLM });
     const session = startSession(services);
     await services.respond(session.logicalOrderId, "I need black shoes under ₹5,000");
     await services.respond(session.logicalOrderId, "UK 9");
     await services.respond(session.logicalOrderId, "road");
     const result = await services.respond(session.logicalOrderId, "compare Streak 4 and Stride Lite");
-    // Defect pin: no compare vocabulary; re-ranks the same shortlist.
-    expect(result.kind).toBe("shortlist");
+    expect(result.kind).toBe("pending");
+    if (result.kind !== "pending") throw new Error("expected pending");
+    expect(result.action).toBe("compare");
   });
 
-  it("'why this one?' follow-up does not produce an explanation (defect L4)", async () => {
+  it("'why this one?' follow-up is interpreted as an explain action (AI-1)", async () => {
     const services = getServices(env, { forceMock: true, llm: DISABLED_LLM });
     const session = startSession(services);
     await services.respond(session.logicalOrderId, "I need black shoes under ₹5,000");
     await services.respond(session.logicalOrderId, "UK 9");
     await services.respond(session.logicalOrderId, "road");
     const result = await services.respond(session.logicalOrderId, "why this one?");
-    expect(result.kind).toBe("shortlist");
+    expect(result.kind).toBe("pending");
+    if (result.kind !== "pending") throw new Error("expected pending");
+    expect(result.action).toBe("explain");
   });
 
   it("'show me something cheaper' does not produce a cheaper alternative (defect L4)", async () => {
@@ -416,6 +419,7 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     await services.buildQuote(session.logicalOrderId, "p_streak_4");
     const result = await services.respond(session.logicalOrderId, "actually size 10");
     expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
     expect(result.message).toContain("does not accept");
   });
 });

@@ -168,6 +168,12 @@ export default function HomePage() {
           setMachineSpend(data.machineSpend ?? null);
         } else if (data.kind === "error") {
           pushAgent(data.message);
+        } else if (data.kind === "pending") {
+          pushAgent(data.message);
+        } else if (data.kind === "select") {
+          await chooseProduct(data.productId);
+        } else if (data.kind === "restart") {
+          await startSession();
         }
         void refreshTimeline(orderId);
       } catch {

@@ -22,9 +22,10 @@ import {
   type PurchaseMandate,
 } from "@agentready/domain";
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
-import { intentDigest, mergeIntents, parseIntentMessage, type ParsedIntent } from "./intent";
+import { intentDigest, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
+import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
 
 export type Session = {
   logicalOrderId: string;
@@ -53,7 +54,10 @@ export type EnvelopeRecord = {
 export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
   | { kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState }
-  | { kind: "error"; message: string; state: OrderState };
+  | { kind: "error"; message: string; state: OrderState }
+  | { kind: "pending"; action: "compare" | "explain"; message: string; productIds?: string[]; state: OrderState }
+  | { kind: "select"; productId: string; state: OrderState }
+  | { kind: "restart"; state: OrderState };
 
 export type AppServices = {
   createSession(): Session;
@@ -189,11 +193,18 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
       }
 
-      const parsed = parseIntentMessage(message);
-      session.intent = mergeIntents(session.intent, parsed);
       session.message = message;
 
-      if (llm.enabled) {
+      // ── AI-1 structured interpretation (deterministic code authoritative) ──
+      const deterministic = deterministicInterpretation(message, session.intent);
+      const outcome = await interpretUserMessage(message, session.intent, llm);
+      const merged = mergeInterpretation(deterministic, outcome);
+      applyInterpretation(session, merged);
+
+      // Legacy soft-preference enrichment only when AI-1 fell back to
+      // deterministic parsing (avoid double LLM calls when the proposal was
+      // accepted).
+      if (llm.enabled && outcome.source !== "llm") {
         const soft = await llm.extractSoftPreferences(message);
         if (soft) {
           const applied: string[] = [];
@@ -221,6 +232,48 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
             });
           }
         }
+      }
+
+      // ── Auditable interpretation record (no chain-of-thought) ──
+      void audit.log({
+        logicalOrderId: orderId,
+        type: "interpreter.interpreted",
+        actor: "agent",
+        summary: `Interpreted action=${merged.action} source=${outcome.source} applied=${countApplied(merged)} rejected=${outcome.rejectedReasons.length}`,
+        inputDigest: intentDigest(session.intent),
+        decision: "allow",
+        reasonCodes: outcome.rejectedReasons.length > 0 ? outcome.rejectedReasons.slice(0, 5) : ["schema_validated"],
+      });
+
+      // ── Route non-search actions ──
+      switch (merged.action) {
+        case "restart":
+          return { kind: "restart", state: session.state };
+        case "compare":
+          return {
+            kind: "pending",
+            action: "compare",
+            productIds: merged.requestedProductIds,
+            message: "Comparing shoes is planned for a later stage. I can refine your search in the meantime.",
+            state: session.state,
+          };
+        case "explain":
+          return {
+            kind: "pending",
+            action: "explain",
+            message: "Explanations are planned for a later stage. I can still refine your search.",
+            state: session.state,
+          };
+        case "select": {
+          const productId = merged.requestedProductIds[0];
+          if (productId) {
+            return { kind: "select", productId, state: session.state };
+          }
+          return { kind: "error", message: "I couldn't identify which shoe you'd like to select.", state: session.state };
+        }
+        case "search":
+        case "refine":
+          break;
       }
 
       if (session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED") {
@@ -845,6 +898,66 @@ function setState(session: Session, next: OrderState): void {
     throw new Error(result.reason);
   }
   session.state = next;
+}
+
+/* ── AI-1 interpretation merge + apply (deterministic code authoritative) ── */
+
+/**
+ * Precedence policy between deterministic parsing and accepted LLM proposals:
+ * 1. Deterministic action detection wins for compare/select/restart/explain/refine.
+ * 2. For every constraint/preference field, a deterministic value wins over an
+ *    LLM proposal for the same field; LLM proposals fill fields deterministic
+ *    parsing left unset (after schema validation).
+ * 3. Removals and corrections are unions, restricted to fields that currently
+ *    exist in session intent.
+ */
+function mergeInterpretation(
+  deterministic: StructuredInterpretation,
+  outcome: InterpretationOutcome,
+): StructuredInterpretation {
+  const llm = outcome.interpretation;
+
+  const action = deterministic.action !== "search" ? deterministic.action : llm.action;
+
+  const hardByField = new Map<string, { value: string | number | boolean; evidence: string }>();
+  for (const c of deterministic.proposedHardConstraints) hardByField.set(c.name, { value: c.value, evidence: c.evidence });
+  for (const c of llm.proposedHardConstraints) {
+    if (!hardByField.has(c.name)) hardByField.set(c.name, { value: c.value, evidence: c.evidence });
+  }
+
+  const softByField = new Map<string, { value: string | number; evidence: string }>();
+  for (const p of deterministic.proposedSoftPreferences) softByField.set(p.name, { value: p.value, evidence: p.evidence });
+  for (const p of llm.proposedSoftPreferences) {
+    if (!softByField.has(p.name)) softByField.set(p.name, { value: p.value, evidence: p.evidence });
+  }
+
+  return {
+    schemaVersion: llm.schemaVersion,
+    action,
+    proposedHardConstraints: [...hardByField.entries()].map(([name, v]) => ({ name: name as StructuredInterpretation["proposedHardConstraints"][number]["name"], value: v.value, evidence: v.evidence })),
+    proposedSoftPreferences: [...softByField.entries()].map(([name, v]) => ({ name: name as StructuredInterpretation["proposedSoftPreferences"][number]["name"], value: v.value, evidence: v.evidence })),
+    corrections: [...new Set([...deterministic.corrections, ...llm.corrections])],
+    removals: [...new Set([...deterministic.removals, ...llm.removals])],
+    ambiguities: llm.ambiguities.length > 0 ? llm.ambiguities : deterministic.ambiguities,
+    confidence: llm.confidence,
+    requestedProductIds: llm.requestedProductIds.length > 0 ? llm.requestedProductIds : deterministic.requestedProductIds,
+  };
+}
+
+function applyInterpretation(session: Session, merged: StructuredInterpretation): void {
+  for (const c of merged.proposedHardConstraints) {
+    (session.intent as Record<string, unknown>)[c.name] = c.value;
+  }
+  for (const p of merged.proposedSoftPreferences) {
+    (session.intent as Record<string, unknown>)[p.name] = p.value;
+  }
+  for (const removal of merged.removals) {
+    if (removal in session.intent) delete (session.intent as Record<string, unknown>)[removal];
+  }
+}
+
+function countApplied(merged: StructuredInterpretation): number {
+  return merged.proposedHardConstraints.length + merged.proposedSoftPreferences.length + merged.removals.length;
 }
 
 function servicesReconcileHeld(
