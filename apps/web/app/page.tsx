@@ -219,20 +219,6 @@ const send = useCallback(
     [orderId, pushAgent, refreshTimeline, startSession, chooseProduct],
   );
 
-  const handleChipRemove = useCallback(
-    (key: string) => {
-      setIntent((prev) => prev.filter((f) => f.key !== key));
-      // Send a removal message to the server
-      const field = intent.find((f) => f.key === key);
-      if (field && field.kind === "preference") {
-        void send(`Remove ${field.label} preference`);
-      } else if (field && field.kind === "requirement") {
-        void send(`Remove ${field.label} requirement`);
-      }
-    },
-    [intent, send],
-  );
-
   const chooseProduct = useCallback(
     async (productId: string) => {
       if (!orderId) return;
@@ -253,6 +239,30 @@ const send = useCallback(
       setBusy(false);
     },
     [orderId, pushAgent],
+  );
+
+  const handleChipRemove = useCallback(
+    (key: string) => {
+      setIntent((prev) => prev.filter((f) => f.key !== key));
+      const field = intent.find((f) => f.key === key);
+      if (field && field.kind === "preference") {
+        void send(`Remove ${field.label} preference`);
+      } else if (field && field.kind === "requirement") {
+        void send(`Remove ${field.label} requirement`);
+      }
+    },
+    [intent, send],
+  );
+
+  const handleChipEdit = useCallback(
+    (key: string, newValue: string) => {
+      setIntent((prev) => prev.map((f) => f.key === key ? { ...f, value: newValue, label: newValue } : f));
+      const field = intent.find((f) => f.key === key);
+      if (field) {
+        void send(`Change ${field.label} to ${newValue}`);
+      }
+    },
+    [intent, send],
   );
 
   const approve = useCallback(async () => {
@@ -553,7 +563,7 @@ const send = useCallback(
 
           {/* Constraint chips → Intent panel */}
           {intent.length > 0 && !receipt && (
-            <IntentPanel fields={intent} onRemove={handleChipRemove} />
+            <IntentPanel fields={intent} onRemove={handleChipRemove} onEdit={handleChipEdit} />
           )}
 
           {/* Loading indicator */}
@@ -862,12 +872,54 @@ function TrustDrawer({
   busy: boolean;
 }) {
   const drawerRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      // Save the element that had focus before opening
+      previousFocusRef.current = document.activeElement as HTMLElement;
+      // Move focus into the drawer's close button
+      setTimeout(() => closeButtonRef.current?.focus(), 100);
+    } else if (previousFocusRef.current) {
+      // Restore focus to the trigger element
+      previousFocusRef.current.focus();
+      previousFocusRef.current = null;
+    }
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Trap Tab/Shift+Tab within the drawer
+      if (e.key === "Tab") {
+        const focusable = drawer.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0]!;
+        const last = focusable[focusable.length - 1]!;
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
     };
+
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
@@ -881,13 +933,13 @@ function TrustDrawer({
         ref={drawerRef}
         className={`drawer${open ? " open" : ""}`}
         role="dialog"
-        aria-label="Order and trust"
         aria-modal="true"
+        aria-labelledby="drawer-title"
         tabIndex={-1}
       >
         <div className="drawer-head">
-          <h2>Order &amp; trust</h2>
-          <button className="drawer-close" type="button" onClick={onClose} aria-label="Close drawer">&times;</button>
+          <h2 id="drawer-title">Order &amp; trust</h2>
+          <button ref={closeButtonRef} className="drawer-close" type="button" onClick={onClose} aria-label="Close drawer">&times;</button>
         </div>
         <div className="drawer-body">
           {/* 1. Payment verification */}

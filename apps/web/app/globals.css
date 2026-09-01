@@ -1208,6 +1208,37 @@ body {
   color: rgba(255, 255, 255, 0.7);
 }
 
+.intent-chip-editing {
+  padding: 4px;
+}
+
+.intent-chip-input {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font-body);
+  color: var(--text);
+  outline: none;
+  min-width: 40px;
+}
+
+/* ─── Minimum touch targets (44px) ─── */
+
+@media (pointer: coarse) {
+  .composer-send,
+  .product-card-select,
+  .btn-outline,
+  .quick-btn,
+  .drawer-close,
+  .intent-chip-remove,
+  .intent-chip-label {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
 /* ─── AI-4 Provider Status ─── */
 
 .provider-status {

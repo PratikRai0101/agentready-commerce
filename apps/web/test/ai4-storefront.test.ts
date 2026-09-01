@@ -148,7 +148,7 @@ describe("AI-4 storefront integration", () => {
       name: "failing", enabled: true,
       extractSoftPreferences: async () => null,
       explainRecommendation: async () => null,
-      interpret: async () => ({ ok: false, reason: "http" as const }),
+      interpret: async () => ({ ok: false as const, reason: "http" as const }),
     };
     const s1 = getServices(env, { skipCache: true, llm: DISABLED_LLM });
     const s2 = getServices(env, { skipCache: true, llm: failing });
