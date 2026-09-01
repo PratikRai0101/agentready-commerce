@@ -95,13 +95,13 @@ export function deterministicInterpretation(
   if (parsed.distanceKm !== undefined) proposedSoft.push({ name: "distanceKm", value: parsed.distanceKm, evidence: evidenceFor(message, `${parsed.distanceKm}K`) });
 
   // "Show me something cheaper" → deterministic budget reduction (app code, not LLM).
-  // This is a refine action with explicit budget reduction.
+  // Only apply when no explicit budget correction already exists.
   const isCheaperRequest = /\bcheaper\b|\bcheapest\b|\blower\s+price\b|\bless\s+expensive\b/.test(lower);
-  if (isCheaperRequest) {
+  if (isCheaperRequest && !corrections.includes("maxAmountMinor")) {
     const currentBudget = currentIntent.maxAmountMinor ?? 500_000;
     const reduced = Math.max(10_000, Math.round(currentBudget * 0.8));
     proposedHard.push({ name: "maxAmountMinor", value: reduced, evidence: evidenceFor(message, "cheaper") });
-    if (!corrections.includes("maxAmountMinor")) corrections.push("maxAmountMinor");
+    corrections.push("maxAmountMinor");
   }
 
   let action: StructuredInterpretation["action"] = "search";

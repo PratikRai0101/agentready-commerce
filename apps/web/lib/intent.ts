@@ -33,9 +33,16 @@ export function parseIntentMessage(message: string): ParsedIntent {
   }
   const textWithoutDistance = text.replace(/\d{1,3}\s*k\s*m?\b/g, " DIST ");
 
-  const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s]*)/);
+  const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s,]*)/);
   if (amountMatch) {
     parsed.maxAmountMinor = parseIndianAmount(amountMatch[1]!);
+  }
+  // Also extract budget from "to ₹X,XXX" pattern (explicit budget edit)
+  if (parsed.maxAmountMinor === undefined) {
+    const toAmountMatch = textWithoutDistance.match(/(?:to|at)\s+(?:₹|rs\.?|inr|rupees?)\s*([\d][\d\s,]*)/);
+    if (toAmountMatch) {
+      parsed.maxAmountMinor = parseIndianAmount(toAmountMatch[1]!);
+    }
   }
 
   for (const size of SIZES) {

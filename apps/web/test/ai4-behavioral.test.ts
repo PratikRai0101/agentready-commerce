@@ -197,3 +197,109 @@ describe("AI-4 public-handler integration", () => {
     expect(r.message).toContain(r.matches[0]!.product.name);
   });
 });
+
+describe("AI-4 budget-edit correctness", () => {
+  it("Change budget to ₹3,000 stores 300000 minor units", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    expect(session.intent.maxAmountMinor).toBe(500_000);
+    await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    expect(session.intent.maxAmountMinor).toBe(300_000);
+  });
+
+  it("edited budget displays ₹3,000 in the visible response", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    const r = await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    // The response should mention ₹3,000 or ₹3000, not ₹4,000
+    expect(r.kind).toBe("shortlist");
+    if (r.kind === "shortlist") {
+      // The budget was ₹3,000 = 300000 minor. Display may show 3000 or 3,000.
+      expect(r.message).toMatch(/3[,.]?000/);
+      expect(r.message).not.toMatch(/4[,.]?000/);
+    }
+  });
+
+  it("eligibility and ranking use the corrected ₹3,000 budget", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    // All ranked products should be within ₹3,000
+    if (session.lastRanking) {
+      for (const m of session.lastRanking.matches) {
+        expect(m.product.priceMinor).toBeLessThanOrEqual(300_000);
+      }
+    }
+  });
+
+  it("budget edit invalidates a pre-approval quote", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    await s.buildQuote(session.logicalOrderId, "p_streak_4");
+    expect(session.dialogue.quoteValid).toBe(true);
+    await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    expect(session.dialogue.quoteValid).toBe(false);
+  });
+
+  it("no stale ₹4,000 value survives in server state", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    expect(session.intent.maxAmountMinor).toBe(300_000);
+    expect(session.intent.maxAmountMinor).not.toBe(400_000);
+    expect(session.intent.maxAmountMinor).not.toBe(500_000);
+  });
+
+  it("malformed or unsupported budget edits are rejected", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    const original = session.intent.maxAmountMinor;
+    // "Change budget to nonsense" should not change the budget
+    await s.respond(session.logicalOrderId, "Change budget to nonsense.");
+    expect(session.intent.maxAmountMinor).toBe(original);
+  });
+
+  it("selection prepares a quote in AWAITING_APPROVAL", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    await s.respond(session.logicalOrderId, "Select Streak 4.");
+    const q = await s.buildQuote(session.logicalOrderId, "p_streak_4");
+    expect(q.state).toBe("AWAITING_APPROVAL");
+    expect(session.state).toBe("AWAITING_APPROVAL");
+  });
+
+  it("material edit after quote does not transition to APPROVED or PAID_VERIFIED", async () => {
+    const s = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(s);
+    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await s.respond(session.logicalOrderId, "UK 9");
+    await s.respond(session.logicalOrderId, "road");
+    await s.buildQuote(session.logicalOrderId, "p_streak_4");
+    expect(session.state).toBe("AWAITING_APPROVAL");
+    await s.respond(session.logicalOrderId, "Change budget to ₹3,000.");
+    expect(session.state).not.toBe("APPROVED");
+    expect(session.state).not.toBe("PAID_VERIFIED");
+    expect(session.state).not.toBe("FULFILLED");
+  });
+});
