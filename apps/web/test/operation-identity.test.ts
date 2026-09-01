@@ -113,18 +113,28 @@ describe("respond operation identity", () => {
     expect(interpretEvents).toHaveLength(1);
   });
 
-  it("pending replay returns operation-in-progress without executing logic", async () => {
+  it("pending replay returns operation-in-progress without executing business logic or audit", async () => {
     const services = getServices(env, { forceMock: true, skipCache: true });
     const session = services.createSession();
     const orderId = session.logicalOrderId;
-    const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_pending");
-    expect(first.kind).not.toBe("error");
-    const eventsAfterFirst = await services.timeline(orderId);
-    const countAfterFirst = eventsAfterFirst.length;
-    const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_pending");
-    if (second.kind === "error") expect(second.message).toContain("in progress");
-    const eventsAfterSecond = await services.timeline(orderId);
-    expect(eventsAfterSecond.length).toBe(countAfterFirst);
+    const binding = { intentVersion: 0, recommendationVersion: 0, recommendationActionToken: "" };
+    services.coordinator.begin("op_rsp_pending", "conversation.respond", {
+      orderId,
+      message: DEMO_MESSAGE,
+      intentVersion: binding.intentVersion,
+      recommendationVersion: binding.recommendationVersion,
+      recommendationActionToken: binding.recommendationActionToken,
+    }, orderId);
+    services.coordinator.transition("op_rsp_pending", "in_progress");
+    const eventsBefore = await services.timeline(orderId);
+    const countBefore = eventsBefore.length;
+    const result = await services.respond(orderId, DEMO_MESSAGE, binding, "op_rsp_pending");
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("Operation in progress");
+    const eventsAfter = await services.timeline(orderId);
+    expect(eventsAfter.length).toBe(countBefore);
+    const sessionAfter = services.getSession(orderId);
+    expect(sessionAfter?.message).toBe("");
   });
 
   it("replayed result is a deep clone, not the same reference", async () => {
@@ -137,22 +147,22 @@ describe("respond operation identity", () => {
     expect(second).not.toBe(first);
   });
 
-  it("mutating original returned result does not affect subsequently replayed payload", async () => {
+  it("mutating first returned result before replay proves stored snapshot is unchanged", async () => {
     const services = getServices(env, { forceMock: true, skipCache: true });
-    const session = services.createSession();
-    const orderId = session.logicalOrderId;
+    const { orderId } = await setupShortlist(services);
     const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_mut");
-    if (first.kind === "shortlist") {
-      first.matches = [];
-      first.state = "FULFILLED";
-      (first as Record<string, unknown>).message = "MUTATED";
-    }
+    expect(first.kind).toBe("shortlist");
+    const originalSnapshot = JSON.parse(JSON.stringify(first));
+    (first as Record<string, unknown>).message = "MUTATED";
+    (first as Record<string, unknown>).state = "FULFILLED";
+    if (first.kind === "shortlist") first.matches = [];
     const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_rsp_mut");
-    expect(second).toEqual(first);
+    expect(second).toEqual(originalSnapshot);
+    expect(second.kind).toBe("shortlist");
     if (second.kind === "shortlist") {
-      expect(second.matches.length).toBeGreaterThan(0);
-      expect(second.state).not.toBe("FULFILLED");
       expect(second.message).not.toBe("MUTATED");
+      expect(second.state).not.toBe("FULFILLED");
+      expect(second.matches.length).toBeGreaterThan(0);
     }
   });
 });
@@ -402,21 +412,22 @@ describe("immutable snapshots", () => {
     expect(retrieved!.resultPayload).toEqual({ nested: { value: 1 } });
   });
 
-  it("mutating original returned object does not affect subsequently replayed payload", async () => {
+  it("mutating first returned object before replay proves stored snapshot is unchanged", async () => {
     const services = getServices(env, { forceMock: true, skipCache: true });
-    const session = services.createSession();
-    const orderId = session.logicalOrderId;
+    const { orderId } = await setupShortlist(services);
     const first = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_immut");
-    if (first.kind === "shortlist") {
-      first.matches = [];
-      first.state = "FULFILLED";
-      (first as Record<string, unknown>).message = "MUTATED";
-    }
+    expect(first.kind).toBe("shortlist");
+    const snapshot = JSON.parse(JSON.stringify(first));
+    (first as Record<string, unknown>).message = "MUTATED";
+    (first as Record<string, unknown>).state = "FULFILLED";
+    if (first.kind === "shortlist") first.matches = [];
     const second = await services.respond(orderId, DEMO_MESSAGE, undefined, "op_immut");
-    expect(second).toEqual(first);
+    expect(second).toEqual(snapshot);
+    expect(second.kind).toBe("shortlist");
     if (second.kind === "shortlist") {
-      expect(second.matches.length).toBeGreaterThan(0);
+      expect(second.message).not.toBe("MUTATED");
       expect(second.state).not.toBe("FULFILLED");
+      expect(second.matches.length).toBeGreaterThan(0);
     }
   });
 });
