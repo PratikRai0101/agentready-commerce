@@ -1073,3 +1073,159 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* ─── AI-4 Intent Panel ─── */
+
+.intent-panel {
+  margin-bottom: 16px;
+}
+
+.intent-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  margin-bottom: 6px;
+}
+
+.intent-unresolved-label {
+  color: var(--warn);
+}
+
+.intent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.intent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+}
+
+.intent-chip.requirement {
+  background: var(--text);
+  color: #fff;
+  border: 1px solid var(--text);
+}
+
+.intent-chip.preference {
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.intent-chip.unresolved {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+
+.intent-chip-label {
+  line-height: 1;
+}
+
+.intent-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 50%;
+  transition: opacity 0.15s;
+}
+
+.intent-chip-remove:hover {
+  opacity: 1;
+}
+
+.intent-chip-remove:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+.intent-chip.requirement .intent-chip-remove {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* ─── AI-4 Loading Indicator ─── */
+
+.loading-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.loading-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: dotPulse 1.4s infinite ease-in-out;
+}
+
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+.loading-text {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.loading-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bad-soft);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--bad);
+}
+
+.loading-retry {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-sm);
+  color: var(--bad);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.loading-retry:hover {
+  background: var(--bad);
+  color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot { animation: none; opacity: 0.6; }
+}

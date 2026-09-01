@@ -6,6 +6,8 @@ import type { AuditEvent } from "@agentready/audit";
 import type { CommerceEnvelope } from "@agentready/domain";
 import { RunVistaBrand } from "./components/RunVistaBrand";
 import { ProductCard } from "./components/ProductCard";
+import { IntentPanel, type IntentField } from "./components/IntentPanel";
+import { LoadingIndicator } from "./components/LoadingIndicator";
 
 type QuoteResult = {
   envelope: CommerceEnvelope;
@@ -95,6 +97,9 @@ export default function HomePage() {
   const [input, setInput] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [techExpanded, setTechExpanded] = useState(false);
+  const [intent, setIntent] = useState<IntentField[]>([]);
+  const [loadingMsg, setLoadingMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -140,7 +145,7 @@ export default function HomePage() {
     void startSession();
   }, [startSession]);
 
-  const send = useCallback(
+const send = useCallback(
     async (raw: string) => {
       const text = raw.trim();
       if (!text || !orderId) return;
@@ -149,6 +154,8 @@ export default function HomePage() {
       setQuestions([]);
       setQuickReplies([]);
       setBusy(true);
+      setLoadingMsg("Interpreting your message\u2026");
+      setErrorMsg(null);
       try {
         const response = await fetch("/api/respond", {
           method: "POST",
@@ -157,17 +164,34 @@ export default function HomePage() {
         });
         const data = await response.json();
         setOrderState(data.state);
+        setLoadingMsg(null);
+
+        // Extract intent from response
+        const newFields: IntentField[] = [];
         if (data.kind === "clarify") {
           pushAgent(data.message);
           setQuestions(data.questions);
           setQuickReplies(data.quickReplies);
+          // Show unresolved from questions
+          for (const q of data.questions) {
+            newFields.push({ key: `unresolved_${q}`, label: q, value: "", kind: "unresolved", editable: false });
+          }
         } else if (data.kind === "shortlist") {
           pushAgent(data.message);
           setMatches(data.matches);
           setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
           setMachineSpend(data.machineSpend ?? null);
+          // Extract intent from matches
+          if (data.matches?.length > 0) {
+            const m = data.matches[0].product;
+            newFields.push({ key: "size", label: "Size", value: m.variants?.[0]?.size ?? "", kind: "requirement", editable: true });
+            newFields.push({ key: "budget", label: "Budget", value: `₹${(data.matches[0].product.priceMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            newFields.push({ key: "fit", label: m.fit, value: m.fit, kind: "preference", editable: true });
+            newFields.push({ key: "cushioning", label: m.cushioning, value: m.cushioning, kind: "preference", editable: true });
+          }
         } else if (data.kind === "error") {
           pushAgent(data.message);
+          setErrorMsg(data.message);
         } else if (data.kind === "compare") {
           const { productA, productB, facts } = data;
           const diffText = facts.differences.length > 0 ? facts.differences.join("; ") : "No major differences found.";
@@ -181,13 +205,30 @@ export default function HomePage() {
         } else if (data.kind === "restart") {
           await startSession();
         }
+        if (newFields.length > 0) setIntent(newFields);
         void refreshTimeline(orderId);
       } catch {
         pushAgent("Something went wrong on our side. Please retry.");
+        setErrorMsg("Network error. Please try again.");
       }
+      setLoadingMsg(null);
       setBusy(false);
     },
-    [orderId, pushAgent, refreshTimeline],
+    [orderId, pushAgent, refreshTimeline, startSession, chooseProduct],
+  );
+
+  const handleChipRemove = useCallback(
+    (key: string) => {
+      setIntent((prev) => prev.filter((f) => f.key !== key));
+      // Send a removal message to the server
+      const field = intent.find((f) => f.key === key);
+      if (field && field.kind === "preference") {
+        void send(`Remove ${field.label} preference`);
+      } else if (field && field.kind === "requirement") {
+        void send(`Remove ${field.label} requirement`);
+      }
+    },
+    [intent, send],
   );
 
   const chooseProduct = useCallback(
@@ -507,22 +548,13 @@ export default function HomePage() {
             />
           )}
 
-          {/* Constraint chips */}
-          {matches && !receipt && (
-            <ConstraintChips
-              requirements={[
-                { label: "UK 9" },
-                { label: "Max \u20B95,000" },
-                { label: "Road running" },
-                { label: "Returnable" },
-              ]}
-              preferences={[
-                { label: "Black" },
-                { label: "Wide fit" },
-                { label: "Cushioning" },
-              ]}
-            />
+          {/* Constraint chips → Intent panel */}
+          {intent.length > 0 && !receipt && (
+            <IntentPanel fields={intent} onRemove={handleChipRemove} />
           )}
+
+          {/* Loading indicator */}
+          <LoadingIndicator busy={busy} error={errorMsg} onRetry={() => setErrorMsg(null)} />
 
           {/* Recommendations */}
           {matches && !receipt && (
