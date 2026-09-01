@@ -14,6 +14,7 @@
     "@agentready/audit": "workspace:*",
     "@agentready/catalog": "workspace:*",
     "@agentready/conformance": "workspace:*",
+    "@agentready/core": "workspace:*",
     "@agentready/domain": "workspace:*",
     "@agentready/payments": "workspace:*",
     "next": "^15.1.6",

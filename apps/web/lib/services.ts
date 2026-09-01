@@ -22,6 +22,11 @@ import {
   type PurchaseMandate,
 } from "@agentready/domain";
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
+import {
+  createOperationCoordinator,
+  MemoryOperationStore,
+  type OperationCoordinator,
+} from "@agentready/core";
 import { intentDigest, SIZES, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
@@ -63,7 +68,7 @@ export type EnvelopeRecord = {
 };
 
 export type RespondResult =
-  | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
+  | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState; parsedIntent?: ParsedIntent }
   | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
   | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
@@ -73,15 +78,15 @@ export type RespondResult =
   | { kind: "restart"; state: OrderState };
 
 export type AppServices = {
-  createSession(): Session;
-  respond(orderId: string, message: string, binding?: RecommendationBinding): Promise<RespondResult>;
-  buildQuote(orderId: string, productId: string, binding?: RecommendationBinding): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
-  approve(orderId: string, digest: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
-  initiatePayment(orderId: string, rail: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
+  createSession(operationId?: string): Session;
+  respond(orderId: string, message: string, binding?: RecommendationBinding, operationId?: string): Promise<RespondResult>;
+  buildQuote(orderId: string, productId: string, binding?: RecommendationBinding, operationId?: string): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
+  approve(orderId: string, digest: string, operationId?: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
+  initiatePayment(orderId: string, rail: string, operationId?: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
   mockCapture(orderId: string): Promise<{ paymentId: string; signature: string; orderId: string }>;
-  verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
-  fulfil(orderId: string, fail: boolean): Promise<{ ok: boolean; state: OrderState; error?: string }>;
-  compensate(orderId: string): Promise<{ ok: boolean; state: OrderState; error?: string; refundId?: string }>;
+  verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
+  fulfil(orderId: string, fail: boolean, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
+  compensate(orderId: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string; refundId?: string }>;
   tamper(orderId: string, field: "price" | "variant"): Promise<{ ok: boolean; state: OrderState; changes: string[]; error?: string }>;
   timeline(orderId: string): Promise<AuditEvent[]>;
   getSession(orderId: string): Session | undefined;
@@ -99,9 +104,10 @@ export type AppServices = {
   findSessionByExternalOrderId(orderIdExternal: string): Session | undefined;
   reset(): void;
   policyCheck(orderId: string, rail: string, candidate?: CommerceEnvelope): { allow: boolean; reasonCodes: string[] };
-  intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; error?: string; reasonCodes?: string[] }>;
+  intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; matches?: ProductMatch[]; recommendationBinding?: RecommendationBinding; fitScores?: Record<string, { fitScore: number; note: string }>; error?: string; reasonCodes?: string[] }>;
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
+  coordinator: OperationCoordinator;
   razorpayKeySecret: string;
   webhookSecret: string | undefined;
   isMock: boolean;
@@ -157,6 +163,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const machineResource = new DemoMachineResource(DEFAULT_MACHINE_SPEND);
   const llm = options?.llm ?? createLlmProvider(env);
   const sessionOperations = new Map<string, Promise<unknown>>();
+  const operationStore = new MemoryOperationStore();
+  const coordinator = createOperationCoordinator(operationStore);
 
   function withSessionLock<T>(orderId: string, operation: () => Promise<T>): Promise<T> {
     const previous = sessionOperations.get(orderId) ?? Promise.resolve();
@@ -170,15 +178,34 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const services: AppServices = {
     registry,
     audit,
+    coordinator,
     razorpayKeySecret,
     webhookSecret,
     isMock,
     razorpayMode,
     llm,
 
-    createSession() {
+    createSession(operationId) {
       const logicalOrderId = newId("ord");
       const customerId = DEMO_CUSTOMER;
+
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "session.create", { customerId }, logicalOrderId);
+        if (idempotency.kind === "conflict") {
+          throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if (phase === "completed" && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as Session;
+          }
+          if (phase === "failed" || phase === "rejected") {
+            throw new Error(idempotency.record.errorRef ?? `Operation ${phase}`);
+          }
+          throw new Error("Operation in progress");
+        }
+      }
+
       const mandate = buildMandate(customerId);
       mandates.set(customerId, mandate);
       const session: Session = {
@@ -197,6 +224,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Session created for ${customerId}`,
         externalReferences: { mandateId: mandate.mandateId },
       });
+      if (operationId) {
+        coordinator.complete(operationId, "success", logicalOrderId, undefined, session);
+      }
       return session;
     },
 
@@ -212,11 +242,38 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return mandates.get(customerId);
     },
 
-    async respond(orderId, message, selectionBinding) {
+    async respond(orderId, message, selectionBinding, operationId) {
       return withSessionLock(orderId, async () => {
+      const binding = selectionBinding ?? { intentVersion: 0, recommendationVersion: 0, recommendationActionToken: "" };
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "conversation.respond", {
+          orderId,
+          message,
+          intentVersion: binding.intentVersion,
+          recommendationVersion: binding.recommendationVersion,
+          recommendationActionToken: binding.recommendationActionToken,
+        }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { kind: "error", message: `Operation ID conflict: ${operationId} was already used with a different request`, state: "DRAFT" } as RespondResult;
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if (phase === "completed" && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as RespondResult;
+          }
+          if (phase === "failed" || phase === "rejected") {
+            return (idempotency.record.resultPayload as RespondResult) ?? { kind: "error", message: idempotency.record.errorRef ?? `Operation ${phase}`, state: "DRAFT" } as RespondResult;
+          }
+          return { kind: "error", message: "Operation in progress", state: "DRAFT" } as RespondResult;
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) {
-        return { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
+        const errorResult: RespondResult = { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, "Unknown session", errorResult);
+        }
+        return errorResult;
       }
 
       session.message = message;
@@ -314,7 +371,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const ranking = session.lastRanking!;
         const replyMessage = await composeShortlistMessage(session, ranking, undefined, llm);
         syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
-        return {
+        const repeatResult: RespondResult = {
           kind: "shortlist",
           message: replyMessage,
           matches: ranking.matches,
@@ -323,13 +380,21 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           parsedIntent: { ...session.intent },
           ...recommendationBinding(session),
         };
+        if (operationId) {
+          coordinator.complete(operationId, "success", session.state, undefined, repeatResult);
+        }
+        return repeatResult;
       }
 
       // ── Search / Refine: rank products or ask clarification ──
       const canRank = session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED" ||
         (session.state === "AWAITING_APPROVAL" && materialChange);
       if (!canRank) {
-        return { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
+        const stateError: RespondResult = { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, `Current state ${session.state} does not accept new product messages.`, stateError);
+        }
+        return stateError;
       }
 
       const intent = buildPurchaseIntent(session);
@@ -345,7 +410,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         void audit.log({ logicalOrderId: orderId, type: "intent.clarification_requested", actor: "agent",
           summary: replyMessage, inputDigest: intentDigest(session.intent) });
         syncMemory(session.dialogue, session.intent, [], allMissingNames, "clarify", message);
-        return { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
+        const clarifyResult: RespondResult = { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state, parsedIntent: { ...session.intent } };
+        if (operationId) {
+          coordinator.complete(operationId, "success", session.state, undefined, clarifyResult);
+        }
+        return clarifyResult;
       }
 
       if (session.state === "AWAITING_APPROVAL" && quoteInvalidated) {
@@ -372,7 +441,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
 
-      return {
+      const respondResult: RespondResult = {
         kind: "shortlist",
         message: (acknowledgement ? acknowledgement + " " : "") + replyMessage,
         matches: ranking.matches,
@@ -382,11 +451,31 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         parsedIntent: { ...session.intent },
         ...recommendationBinding(session),
       };
+      if (operationId) {
+        coordinator.complete(operationId, "success", session.state, undefined, respondResult);
+      }
+      return respondResult;
       });
     },
 
-    async buildQuote(orderId, productId, selectionBinding) {
+    async buildQuote(orderId, productId, selectionBinding, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "quote.build", { orderId, productId }, orderId);
+        if (idempotency.kind === "conflict") {
+          throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if (phase === "completed" && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding;
+          }
+          if (phase === "failed" || phase === "rejected") {
+            throw new Error(idempotency.record.errorRef ?? `Operation ${phase}`);
+          }
+          throw new Error("Operation in progress");
+        }
+      }
       const session = sessions.get(orderId);
       if (!session) throw new Error("Unknown session");
 
@@ -459,7 +548,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Envelope ${digest.slice(0, 16)}… for ${product.name} ${size} — ${formatMinor(total)}`,
         inputDigest: digest,
       });
-      return {
+      const quoteResult = {
         envelope,
         digest,
         signature,
@@ -467,32 +556,68 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         approvalEventId: session.approvalEventId,
         ...binding,
       };
+      if (operationId) {
+        coordinator.complete(operationId, "success", digest, undefined, quoteResult);
+      }
+      return quoteResult;
       });
     },
 
-    async approve(orderId, digest) {
+    async approve(orderId, digest, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "approval.grant", { orderId, digest }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; approvalEventId?: string; state: OrderState; error?: string };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          if ((idempotency.record.phase === "failed" || idempotency.record.phase === "rejected") && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; approvalEventId?: string; state: OrderState; error?: string };
+          }
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
-      if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
       const record = envelopes.get(orderId);
-      if (!record) return { ok: false, state: session.state, error: "No envelope to approve" };
+      if (!record) {
+        const r = { ok: false, state: session.state, error: "No envelope to approve" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No envelope to approve", r);
+        return r;
+      }
 
       if (!session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
         !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
         record.intentDigest !== intentDigest(session.intent)) {
-        return { ok: false, state: session.state, error: "This quote is no longer active for the current intent" };
+        const r = { ok: false, state: session.state, error: "This quote is no longer active for the current intent" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       if (session.approvalEventId && session.approvedDigest === digest) {
-        return { ok: true, approvalEventId: session.approvalEventId, state: session.state };
+        const r = { ok: true, approvalEventId: session.approvalEventId, state: session.state };
+        if (operationId) coordinator.complete(operationId, "success", session.approvalEventId, undefined, r);
+        return r;
       }
 
       if (record.digest !== digest) {
-        return { ok: false, state: session.state, error: "Digest mismatch: approval must bind to the exact envelope hash" };
+        const r = { ok: false, state: session.state, error: "Digest mismatch: approval must bind to the exact envelope hash" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
       if (record.envelope.expiresAt < new Date().toISOString()) {
         setState(session, "EXPIRED");
-        return { ok: false, state: session.state, error: "Quote expired" };
+        const r = { ok: false, state: session.state, error: "Quote expired" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       const approvalEventId = newId("appr");
@@ -509,30 +634,62 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         decision: "allow",
         reasonCodes: ["approval_binds_hash"],
       });
-      return { ok: true, approvalEventId, state: session.state };
+      const approveResult = { ok: true, approvalEventId, state: session.state } as const;
+      if (operationId) {
+        coordinator.complete(operationId, "success", approvalEventId, undefined, approveResult);
+      }
+      return approveResult;
       });
     },
 
-    async initiatePayment(orderId, rail) {
+    async initiatePayment(orderId, rail, operationId) {
       return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "payment.initiate", { orderId, rail }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request`, reasonCodes: ["operation_conflict"] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          if ((idempotency.record.phase === "failed" || idempotency.record.phase === "rejected") && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] };
+          }
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress", reasonCodes: ["operation_pending"] };
+        }
+      }
       const session = sessions.get(orderId);
-      if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
       const record = envelopes.get(orderId);
-      if (!record) return { ok: false, state: session.state, error: "No envelope" };
+      if (!record) {
+        const r = { ok: false, state: session.state, error: "No envelope" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No envelope", r);
+        return r;
+      }
 
       if (!session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
         !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
         record.intentDigest !== intentDigest(session.intent)) {
-        return {
+        const r = {
           ok: false,
           state: session.state,
           error: "Payment blocked: this quote is no longer active for the current intent",
           reasonCodes: ["quote_invalidated"],
         };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       if (session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
-        return { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected." };
+        const r = { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected." };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       const mandate = mandates.get(session.customerId);
@@ -555,16 +712,20 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: verdict.decision,
           reasonCodes: verdict.reasonCodes,
         });
-        return { ok: false, state: session.state, error: `Policy blocked payment: ${verdict.reasonCodes.join(", ")}`, reasonCodes: verdict.reasonCodes };
+        const r = { ok: false, state: session.state, error: `Policy blocked payment: ${verdict.reasonCodes.join(", ")}`, reasonCodes: verdict.reasonCodes };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       if (record.envelope.totalMinor < 100) {
-        return {
+        const r = {
           ok: false,
           state: session.state,
           error: "Order amount is below Razorpay's 100 paise minimum",
           reasonCodes: ["amount_below_minimum"],
         };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       if (session.externalOrderId) {
@@ -581,11 +742,17 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           amountMinor: record.envelope.totalMinor,
           currency: record.envelope.currency,
         };
-        return { ok: true, attempt, state: session.state };
+        const r = { ok: true, attempt, state: session.state };
+        if (operationId) coordinator.complete(operationId, "success", attempt.externalOrderId ?? undefined, undefined, r);
+        return r;
       }
 
       const adapter = registry.get(rail as "razorpay_checkout");
-      if (!adapter) return { ok: false, state: session.state, error: `No adapter for rail ${rail}` };
+      if (!adapter) {
+        const r = { ok: false, state: session.state, error: `No adapter for rail ${rail}` };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
 
       setState(session, "PAYMENT_PENDING");
       try {
@@ -599,7 +766,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           externalReferences: { orderId: attempt.externalOrderId ?? "" },
           decision: "allow",
         });
-        return { ok: true, attempt, state: session.state };
+        const payResult = { ok: true, attempt, state: session.state } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "success", attempt.externalOrderId ?? undefined, undefined, payResult);
+        }
+        return payResult;
       } catch (error) {
         setState(session, "PAYMENT_FAILED");
         void audit.log({
@@ -609,7 +780,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Order creation failed: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
-        return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
+        const failResult = { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error), failResult);
+        }
+        return failResult;
       }
       });
     },
@@ -622,11 +797,32 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return { paymentId, signature, orderId: session.externalOrderId };
     },
 
-    async verifyPayment(orderId, externalOrderId, externalPaymentId, signature) {
+    async verifyPayment(orderId, externalOrderId, externalPaymentId, signature, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "payment.verify", { orderId, externalOrderId, externalPaymentId }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if ((phase === "completed" || phase === "failed" || phase === "rejected") && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string };
+          }
+          return { ok: false, state: "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
-      if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
       const record = envelopes.get(orderId);
-      if (!record) return { ok: false, state: session.state, error: "No envelope" };
+      if (!record) {
+        const r = { ok: false, state: session.state, error: "No envelope" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No envelope", r);
+        return r;
+      }
 
       if (externalOrderId !== session.externalOrderId) {
         void audit.log({
@@ -638,11 +834,15 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           reasonCodes: ["order_id_mismatch"],
         });
         setState(session, "PAYMENT_FAILED");
-        return { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
+        const r = { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
 
       if (session.verification?.verified) {
-        return { ok: true, state: session.state };
+        const r = { ok: true, state: session.state };
+        if (operationId) coordinator.complete(operationId, "success", externalPaymentId, undefined, r);
+        return r;
       }
 
       const adapter = registry.get("razorpay_checkout")!;
@@ -669,7 +869,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["signature_invalid"],
         });
-        return { ok: false, state: session.state, error: result.reason ?? "Verification failed" };
+        const failResult = { ok: false, state: session.state, error: result.reason ?? "Verification failed" } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, result.reason ?? "Verification failed", failResult);
+        }
+        return failResult;
       }
 
       const bindingFailures: string[] = [];
@@ -697,7 +901,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["rail_binding_failed"],
         });
-        return { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` };
+        const bindFailResult = { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, `Payment binding rejected: ${bindingFailures.join("; ")}`, bindFailResult);
+        }
+        return bindFailResult;
       }
 
       setState(session, "PAID_VERIFIED");
@@ -715,14 +923,41 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         servicesReconcileHeld(orderId, session, audit, webhookDedup);
       }
 
-      return { ok: true, state: session.state };
+      const verifyResult = { ok: true, state: session.state } as const;
+      if (operationId) {
+        coordinator.complete(operationId, "success", externalPaymentId, undefined, verifyResult);
+      }
+      return verifyResult;
     },
 
-    async fulfil(orderId, fail) {
+    async fulfil(orderId, fail, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "fulfilment.complete", { orderId, fail }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if (phase === "completed" && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string };
+          }
+          if ((phase === "failed" || phase === "rejected") && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string };
+          }
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
-      if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
       if (session.state !== "PAID_VERIFIED") {
-        return { ok: false, state: session.state, error: `Fulfilment requires PAID_VERIFIED, current state ${session.state}` };
+        const r = { ok: false, state: session.state, error: `Fulfilment requires PAID_VERIFIED, current state ${session.state}` };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
       setState(session, "FULFILMENT_PENDING");
       if (fail) {
@@ -735,7 +970,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "review",
           reasonCodes: ["inventory_unavailable"],
         });
-        return { ok: false, state: session.state, error: "Simulated fulfilment failure: inventory unavailable" };
+        const fulfilFailResult = { ok: false, state: session.state, error: "Simulated fulfilment failure: inventory unavailable" } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, "Simulated fulfilment failure: inventory unavailable", fulfilFailResult);
+        }
+        return fulfilFailResult;
       }
       setState(session, "FULFILLED");
       void audit.log({
@@ -745,18 +984,53 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: "Order shipped",
         decision: "allow",
       });
-      return { ok: true, state: session.state };
+      const fulfilSuccessResult = { ok: true, state: session.state } as const;
+      if (operationId) {
+        coordinator.complete(operationId, "success", orderId, undefined, fulfilSuccessResult);
+      }
+      return fulfilSuccessResult;
     },
 
-    async compensate(orderId) {
+    async compensate(orderId, operationId) {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "compensation.refund", { orderId }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay") {
+          const phase = idempotency.record.phase;
+          if (phase === "completed" && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string; refundId?: string };
+          }
+          if ((phase === "failed" || phase === "rejected") && idempotency.record.resultPayload !== undefined) {
+            return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string; refundId?: string };
+          }
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
       const session = sessions.get(orderId);
-      if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
       if (session.state !== "FULFILMENT_FAILED" && session.state !== "COMPENSATION_PENDING") {
-        return { ok: false, state: session.state, error: `Compensation requires FULFILMENT_FAILED, current state ${session.state}` };
+        const r = { ok: false, state: session.state, error: `Compensation requires FULFILMENT_FAILED, current state ${session.state}` };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
       }
       const record = envelopes.get(orderId);
-      if (!record) return { ok: false, state: session.state, error: "No envelope" };
-      if (!session.externalPaymentId) return { ok: false, state: session.state, error: "No external payment id" };
+      if (!record) {
+        const r = { ok: false, state: session.state, error: "No envelope" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No envelope", r);
+        return r;
+      }
+      if (!session.externalPaymentId) {
+        const r = { ok: false, state: session.state, error: "No external payment id" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No external payment id", r);
+        return r;
+      }
 
       setState(session, "COMPENSATION_PENDING");
       const adapter = registry.get("razorpay_checkout")!;
@@ -780,7 +1054,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "allow",
           reasonCodes: ["paid_fulfilment_failure_refunded"],
         });
-        return { ok: true, state: session.state, refundId: result.refundId };
+        const refundResult = { ok: true, state: session.state, refundId: result.refundId } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "success", result.refundId ?? undefined, undefined, refundResult);
+        }
+        return refundResult;
       } catch (error) {
         setState(session, "MANUAL_REVIEW");
         void audit.log({
@@ -790,7 +1068,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Refund failed; routed to manual review: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
-        return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
+        const refundFailResult = { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error), refundFailResult);
+        }
+        return refundFailResult;
       }
     },
 
@@ -950,6 +1232,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       envelopes.clear();
       mandates.clear();
       webhookDedup.clear();
+      coordinator.clear();
       machineResource.reset();
       void audit.log({
         logicalOrderId: "system",
@@ -996,7 +1279,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           }
         }
         if (patch.size !== undefined) {
-          if (!SIZES.includes(patch.size)) {
+          if (patch.size !== "" && patch.size !== null && !SIZES.includes(patch.size)) {
             return { ok: false, state: session.state, error: `Invalid size: ${patch.size}`, reasonCodes: ["invalid_size"] };
           }
         }
@@ -1017,15 +1300,57 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const previousIntent = { ...session.intent };
         const previousEnvelope = envelopes.get(orderId);
 
-        // Apply the patch to session intent
+        // Apply the patch to session intent (empty/null clears the field)
         if (patch.maxAmountMinor !== undefined) session.intent.maxAmountMinor = patch.maxAmountMinor;
-        if (patch.size !== undefined) session.intent.size = patch.size;
-        if (patch.colour !== undefined) session.intent.colour = patch.colour;
-        if (patch.useCase !== undefined) session.intent.useCase = patch.useCase;
-        if (patch.fit !== undefined) session.intent.fit = patch.fit;
-        if (patch.cushioning !== undefined) session.intent.cushioning = patch.cushioning;
-        if (patch.distanceKm !== undefined) session.intent.distanceKm = patch.distanceKm;
-        if (patch.mustBeReturnable !== undefined) session.intent.mustBeReturnable = patch.mustBeReturnable;
+        if (patch.size !== undefined) {
+          if (patch.size === "" || patch.size === null) {
+            delete (session.intent as Record<string, unknown>).size;
+          } else {
+            session.intent.size = patch.size;
+          }
+        }
+        if (patch.colour !== undefined) {
+          if (patch.colour === "" || patch.colour === null) {
+            delete (session.intent as Record<string, unknown>).colour;
+          } else {
+            session.intent.colour = patch.colour;
+          }
+        }
+        if (patch.useCase !== undefined) {
+          if (patch.useCase === "" || patch.useCase === null) {
+            delete (session.intent as Record<string, unknown>).useCase;
+          } else {
+            session.intent.useCase = patch.useCase;
+          }
+        }
+        if (patch.fit !== undefined) {
+          if (patch.fit === "" || patch.fit === null) {
+            delete (session.intent as Record<string, unknown>).fit;
+          } else {
+            session.intent.fit = patch.fit;
+          }
+        }
+        if (patch.cushioning !== undefined) {
+          if (patch.cushioning === "" || patch.cushioning === null) {
+            delete (session.intent as Record<string, unknown>).cushioning;
+          } else {
+            session.intent.cushioning = patch.cushioning;
+          }
+        }
+        if (patch.distanceKm !== undefined) {
+          if (patch.distanceKm === 0 || patch.distanceKm === null) {
+            delete (session.intent as Record<string, unknown>).distanceKm;
+          } else {
+            session.intent.distanceKm = patch.distanceKm;
+          }
+        }
+        if (patch.mustBeReturnable !== undefined) {
+          if (!patch.mustBeReturnable) {
+            delete (session.intent as Record<string, unknown>).mustBeReturnable;
+          } else {
+            session.intent.mustBeReturnable = patch.mustBeReturnable;
+          }
+        }
 
         // Detect material change and invalidate
         const materialChange = hasIntentChanged(previousIntent, session.intent);
@@ -1063,7 +1388,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         recordRecommendation(session, ranking);
 
         if (!ranking.ranked) {
-          setState(session, "CLARIFYING");
+          // State may not allow CLARIFYING transition; set directly
+          session.state = "CLARIFYING";
         } else if (session.state === "CLARIFYING") {
           setState(session, "QUOTED");
         }
@@ -1078,11 +1404,19 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           reasonCodes: ["intent_patch_applied"],
         });
 
+        const freshBinding = recommendationBinding(session);
+        const fitScoreMap = session.machineSpend?.fitScores
+          ? Object.fromEntries(session.machineSpend.fitScores.map((f) => [f.productId, { fitScore: f.fitScore, note: f.note }]))
+          : undefined;
+
         return {
           ok: true,
           state: session.state,
           parsedIntent: { ...session.intent },
           intentVersion: session.dialogue.intentVersion,
+          matches: ranking.ranked ? ranking.matches : [],
+          recommendationBinding: freshBinding,
+          fitScores: fitScoreMap,
         };
       });
     },

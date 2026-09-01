@@ -60,7 +60,7 @@ export function parseIntentMessage(message: string): ParsedIntent {
 
   // Generic "under/below/max" pattern: only when no correction pattern matched.
   if (parsed.maxAmountMinor === undefined) {
-    const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s,]*)/);
+    const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to|for)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s,]*)/);
     if (amountMatch) {
       parsed.maxAmountMinor = parseIndianAmount(amountMatch[1]!);
     }
