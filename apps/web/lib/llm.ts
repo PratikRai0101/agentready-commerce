@@ -28,9 +28,13 @@ export type LlmProvider = {
   readonly enabled: boolean;
   extractSoftPreferences(message: string): Promise<SoftPreferenceExtraction | null>;
   explainRecommendation(input: ExplainInput): Promise<string | null>;
-  /** AI-1: raw structured interpretation proposal (parsed + validated by the interpreter layer). */
-  interpret(message: string): Promise<unknown>;
+  /** AI-1: raw structured interpretation proposal. Reason distinguishes failures. */
+  interpret(message: string): Promise<InterpretCallResult>;
 };
+
+export type InterpretCallResult =
+  | { ok: true; value: unknown }
+  | { ok: false; reason: "timeout" | "http" | "malformed" | "empty" | "disabled" };
 
 export type LlmDeps = {
   fetchFn?: typeof fetch;
@@ -56,12 +60,16 @@ export function createLlmProvider(env: NodeJS.ProcessEnv, deps: LlmDeps = {}): L
         return null;
       },
       async interpret() {
-        return null;
+        return { ok: false, reason: "disabled" };
       },
     };
   }
 
-  async function chat(system: string, user: string, jsonMode: boolean): Promise<string | null> {
+  async function chat(
+    system: string,
+    user: string,
+    jsonMode: boolean,
+  ): Promise<{ ok: true; content: string } | { ok: false; reason: "timeout" | "http" | "empty" }> {
     try {
       const response = await fetchFn(`${baseUrl}/chat/completions`, {
         method: "POST",
@@ -83,15 +91,17 @@ export function createLlmProvider(env: NodeJS.ProcessEnv, deps: LlmDeps = {}): L
       if (!response.ok) {
         // Log status only — never the body (it may echo secrets or customer data).
         console.warn(`[llm] ${providerName} returned HTTP ${response.status} for ${jsonMode ? "extraction" : "explanation"}`);
-        return null;
+        return { ok: false, reason: "http" };
       }
       const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const content = payload.choices?.[0]?.message?.content;
-      return typeof content === "string" && content.length > 0 ? content : null;
+      if (typeof content !== "string" || content.length === 0) return { ok: false, reason: "empty" };
+      return { ok: true, content };
     } catch (error) {
       const reason = error instanceof Error ? error.name : "unknown";
       console.warn(`[llm] ${providerName} ${jsonMode ? "extraction" : "explanation"} failed (${reason})`);
-      return null;
+      if (reason === "TimeoutError" || reason === "AbortError") return { ok: false, reason: "timeout" };
+      return { ok: false, reason: "http" };
     }
   }
 
@@ -105,9 +115,9 @@ export function createLlmProvider(env: NodeJS.ProcessEnv, deps: LlmDeps = {}): L
         `Customer message:\n${message.slice(0, 2000)}`,
         true,
       );
-      if (!raw) return null;
+      if (!raw.ok) return null;
       try {
-        return sanitizeSoftPreferences(JSON.parse(raw));
+        return sanitizeSoftPreferences(JSON.parse(raw.content));
       } catch {
         console.warn(`[llm] ${providerName} returned malformed JSON for extraction; falling back to deterministic parsing`);
         return null;
@@ -116,18 +126,18 @@ export function createLlmProvider(env: NodeJS.ProcessEnv, deps: LlmDeps = {}): L
 
     async explainRecommendation(input) {
       const raw = await chat(EXPLANATION_SYSTEM, JSON.stringify(structuredMatches(input.matches)), false);
-      if (!raw) return null;
-      return sanitizeProse(raw);
+      if (!raw.ok) return null;
+      return sanitizeProse(raw.content);
     },
 
     async interpret(message) {
       // The interpreter layer builds and injects the full schema prompt.
       const raw = await chat(INTERPRET_SYSTEM, message.slice(0, 2000), true);
-      if (!raw) return null;
+      if (!raw.ok) return { ok: false, reason: raw.reason };
       try {
-        return JSON.parse(raw) as unknown;
+        return { ok: true, value: JSON.parse(raw.content) as unknown };
       } catch {
-        return null;
+        return { ok: false, reason: "malformed" };
       }
     },
   };

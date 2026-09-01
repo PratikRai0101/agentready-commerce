@@ -38,19 +38,22 @@ export async function interpretUserMessage(
     return deterministicOutcome(message, currentIntent, "disabled");
   }
 
-  let raw: unknown;
+  let call: { ok: true; value: unknown } | { ok: false; reason: string };
   try {
-    raw = await (llm as { interpret: (m: string) => Promise<unknown> }).interpret(message);
+    call = await llm.interpret(message) as { ok: true; value: unknown } | { ok: false; reason: string };
   } catch (error) {
     const reason = error instanceof Error ? error.name : "unknown";
     return deterministicOutcome(message, currentIntent, reason === "TimeoutError" || reason === "AbortError" ? "timeout" : "http");
   }
 
-  if (raw === null || raw === undefined) {
-    return deterministicOutcome(message, currentIntent, "empty");
+  if (!call.ok) {
+    const reason = call.reason === "timeout" || call.reason === "http" || call.reason === "malformed" || call.reason === "empty"
+      ? (call.reason as FallbackReason)
+      : "http";
+    return deterministicOutcome(message, currentIntent, reason);
   }
 
-  const validation = validateInterpretation(raw, { message, catalog: { productIds: CATALOG_PRODUCT_IDS } });
+  const validation = validateInterpretation(call.value, { message, catalog: { productIds: CATALOG_PRODUCT_IDS } });
   if (!validation.valid || !validation.interpretation) {
     return {
       source: "deterministic",
