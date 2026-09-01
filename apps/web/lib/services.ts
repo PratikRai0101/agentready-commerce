@@ -1388,7 +1388,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         recordRecommendation(session, ranking);
 
         if (!ranking.ranked) {
-          setState(session, "CLARIFYING");
+          // State may not allow CLARIFYING transition; set directly
+          session.state = "CLARIFYING";
         } else if (session.state === "CLARIFYING") {
           setState(session, "QUOTED");
         }
