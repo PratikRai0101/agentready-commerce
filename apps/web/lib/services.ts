@@ -22,7 +22,7 @@ import {
   type PurchaseMandate,
 } from "@agentready/domain";
 import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
-import { intentDigest, type ParsedIntent } from "./intent";
+import { intentDigest, SIZES, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
@@ -99,6 +99,7 @@ export type AppServices = {
   findSessionByExternalOrderId(orderIdExternal: string): Session | undefined;
   reset(): void;
   policyCheck(orderId: string, rail: string, candidate?: CommerceEnvelope): { allow: boolean; reasonCodes: string[] };
+  intentPatch(orderId: string, patch: { maxAmountMinor?: number; size?: string; colour?: string; useCase?: string; fit?: string; cushioning?: string; distanceKm?: number; mustBeReturnable?: boolean }, expectedIntentVersion: number): Promise<{ ok: boolean; state: OrderState; parsedIntent?: ParsedIntent; intentVersion?: number; error?: string; reasonCodes?: string[] }>;
   registry: AdapterRegistry;
   audit: ReturnType<typeof createAuditLedger>;
   razorpayKeySecret: string;
@@ -955,6 +956,134 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         type: "system.reset",
         actor: "system",
         summary: "Fresh-demo reset: all sessions, envelopes, webhook dedup and machine resource state cleared",
+      });
+    },
+
+    async intentPatch(orderId, patch, expectedIntentVersion) {
+      return withSessionLock(orderId, async () => {
+        const session = sessions.get(orderId);
+        if (!session) return { ok: false, state: "DRAFT", error: "Unknown session" };
+
+        // Validate intent version
+        if (session.dialogue.intentVersion !== expectedIntentVersion) {
+          return { ok: false, state: session.state, error: "Intent version mismatch. Please refresh.", reasonCodes: ["version_mismatch"] };
+        }
+
+        // Validate allowed fields and types
+        const allowedFields: Record<string, string> = {
+          maxAmountMinor: "number",
+          size: "string",
+          colour: "string",
+          useCase: "string",
+          fit: "string",
+          cushioning: "string",
+          distanceKm: "number",
+          mustBeReturnable: "boolean",
+        };
+        for (const [key, expectedType] of Object.entries(patch)) {
+          if (!(key in allowedFields)) {
+            return { ok: false, state: session.state, error: `Unknown intent field: ${key}`, reasonCodes: ["invalid_field"] };
+          }
+          if (typeof patch[key as keyof typeof patch] !== allowedFields[key]) {
+            return { ok: false, state: session.state, error: `Invalid type for ${key}: expected ${allowedFields[key]}`, reasonCodes: ["invalid_type"] };
+          }
+        }
+
+        // Validate ranges
+        if (patch.maxAmountMinor !== undefined) {
+          if (patch.maxAmountMinor < 10_00 || patch.maxAmountMinor > 10_000_00) {
+            return { ok: false, state: session.state, error: "Budget must be between ₹100 and ₹1,00,000", reasonCodes: ["out_of_range"] };
+          }
+        }
+        if (patch.size !== undefined) {
+          if (!SIZES.includes(patch.size)) {
+            return { ok: false, state: session.state, error: `Invalid size: ${patch.size}`, reasonCodes: ["invalid_size"] };
+          }
+        }
+        if (patch.colour !== undefined) {
+          const validColours = ["black", "white", "grey", "navy", "blue", "red"];
+          if (!validColours.includes(patch.colour)) {
+            return { ok: false, state: session.state, error: `Invalid colour: ${patch.colour}`, reasonCodes: ["invalid_colour"] };
+          }
+        }
+        if (patch.useCase !== undefined) {
+          const validUseCases = ["road", "trail", "gym", "casual"];
+          if (!validUseCases.includes(patch.useCase)) {
+            return { ok: false, state: session.state, error: `Invalid use case: ${patch.useCase}`, reasonCodes: ["invalid_use_case"] };
+          }
+        }
+
+        // Capture previous state for invalidation logic
+        const previousIntent = { ...session.intent };
+        const previousEnvelope = envelopes.get(orderId);
+
+        // Apply the patch to session intent
+        if (patch.maxAmountMinor !== undefined) session.intent.maxAmountMinor = patch.maxAmountMinor;
+        if (patch.size !== undefined) session.intent.size = patch.size;
+        if (patch.colour !== undefined) session.intent.colour = patch.colour;
+        if (patch.useCase !== undefined) session.intent.useCase = patch.useCase;
+        if (patch.fit !== undefined) session.intent.fit = patch.fit;
+        if (patch.cushioning !== undefined) session.intent.cushioning = patch.cushioning;
+        if (patch.distanceKm !== undefined) session.intent.distanceKm = patch.distanceKm;
+        if (patch.mustBeReturnable !== undefined) session.intent.mustBeReturnable = patch.mustBeReturnable;
+
+        // Detect material change and invalidate
+        const materialChange = hasIntentChanged(previousIntent, session.intent);
+        if (materialChange) {
+          session.dialogue.intentVersion += 1;
+          session.lastRanking = undefined;
+          invalidateRecommendations(session.dialogue);
+          invalidateQuote(session.dialogue);
+          session.approvalEventId = undefined;
+          session.approvedDigest = undefined;
+          if (previousEnvelope) {
+            envelopes.delete(orderId);
+            void audit.log({
+              logicalOrderId: orderId,
+              type: "quote.invalidated",
+              actor: "system",
+              summary: `Quote ${previousEnvelope.digest.slice(0, 16)}… invalidated due to intent patch`,
+              inputDigest: previousEnvelope.digest,
+              outputDigest: intentDigest(session.intent),
+              decision: "block",
+              reasonCodes: ["intent_patch", "material_change_refinement"],
+            });
+          }
+        }
+
+        // Re-rank products with the new intent
+        if (session.state === "AWAITING_APPROVAL" && materialChange) {
+          setState(session, "QUOTED");
+        } else if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED" && session.state !== "DRAFT" && session.state !== "CLARIFYING") {
+          setState(session, "QUOTED");
+        }
+
+        const intent = buildPurchaseIntent(session);
+        const ranking = rankProducts(intent, SHOE_CATALOG);
+        recordRecommendation(session, ranking);
+
+        if (!ranking.ranked) {
+          setState(session, "CLARIFYING");
+        } else if (session.state === "CLARIFYING") {
+          setState(session, "QUOTED");
+        }
+
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "intent.patched",
+          actor: "customer",
+          summary: `Intent patched: ${Object.keys(patch).join(", ")}`,
+          inputDigest: intentDigest(session.intent),
+          decision: "allow",
+          reasonCodes: ["intent_patch_applied"],
+        });
+
+        return {
+          ok: true,
+          state: session.state,
+          parsedIntent: { ...session.intent },
+          intentVersion: session.dialogue.intentVersion,
+        };
       });
     },
   };

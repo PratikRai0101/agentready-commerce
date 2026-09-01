@@ -13,7 +13,7 @@ export type ParsedIntent = {
 };
 
 const USE_CASES = ["road", "trail", "gym", "casual"] as const;
-const SIZES = ["UK 6", "UK 7", "UK 8", "UK 9", "UK 10", "UK 11"];
+export const SIZES = ["UK 6", "UK 7", "UK 8", "UK 9", "UK 10", "UK 11"];
 const COLOURS = ["black", "white", "grey", "navy", "blue", "red"];
 const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
@@ -33,15 +33,36 @@ export function parseIntentMessage(message: string): ParsedIntent {
   }
   const textWithoutDistance = text.replace(/\d{1,3}\s*k\s*m?\b/g, " DIST ");
 
-  const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s,]*)/);
-  if (amountMatch) {
-    parsed.maxAmountMinor = parseIndianAmount(amountMatch[1]!);
+  // Extract all amounts from the message.
+  // Matches: ₹/rs-prefixed amounts, comma/space-separated (3,000 / 3 000), or 4+ bare digits.
+  // Excludes single-digit numbers like "UK 9" or "10K".
+  const amountRe = /(?:₹|rs\.?)\s*([\d][\d\s,]+)|([\d]{1,3}(?:[\s,]\d{3})+)|([\d]{4,})/g;
+  const allAmounts = [...textWithoutDistance.matchAll(amountRe)]
+    .map((m) => {
+      const raw = m[1] || m[2] || m[3] || "";
+      const digits = raw.replace(/[^\d]/g, "");
+      return digits ? Math.round(Number(digits) * 100) : null;
+    })
+    .filter((n): n is number => n !== null);
+
+  // Correction patterns: when "to" or arrow is present with multiple amounts,
+  // the destination/right-hand value is the last amount. This correctly handles
+  // "Change Max ₹5,000 to Max ₹3,000" where "max ₹" sits between "to" and "3000".
+  const hasCorrectionKeyword = /(?:\bto\b|→|->|=>)/.test(textWithoutDistance);
+  if (hasCorrectionKeyword && allAmounts.length >= 2) {
+    parsed.maxAmountMinor = allAmounts[allAmounts.length - 1]!;
   }
-  // Also extract budget from "to ₹X,XXX" pattern (explicit budget edit)
+
+  // Single-amount correction: "Change budget to 3000", "Set max to Rs. 3,000"
+  if (parsed.maxAmountMinor === undefined && allAmounts.length === 1 && hasCorrectionKeyword) {
+    parsed.maxAmountMinor = allAmounts[0]!;
+  }
+
+  // Generic "under/below/max" pattern: only when no correction pattern matched.
   if (parsed.maxAmountMinor === undefined) {
-    const toAmountMatch = textWithoutDistance.match(/(?:to|at)\s+(?:₹|rs\.?|inr|rupees?)\s*([\d][\d\s,]*)/);
-    if (toAmountMatch) {
-      parsed.maxAmountMinor = parseIndianAmount(toAmountMatch[1]!);
+    const amountMatch = textWithoutDistance.match(/(?:under|below|less than|max|at most|upto|up to)\s*(?:₹|rs\.?|inr|rupees?)?\s*([\d][\d\s,]*)/);
+    if (amountMatch) {
+      parsed.maxAmountMinor = parseIndianAmount(amountMatch[1]!);
     }
   }
 

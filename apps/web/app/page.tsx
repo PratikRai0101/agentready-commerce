@@ -101,6 +101,7 @@ export default function HomePage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [techExpanded, setTechExpanded] = useState(false);
   const [intent, setIntent] = useState<IntentField[]>([]);
+  const [intentVersion, setIntentVersion] = useState(0);
   const [recommendationBinding, setRecommendationBinding] = useState<RecommendationBinding | null>(null);
   const [loadingMsg, setLoadingMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -137,6 +138,7 @@ export default function HomePage() {
     setTimeline([]);
     setPaymentIds(null);
     setIntent([]);
+    setIntentVersion(0);
     const response = await fetch("/api/session", { method: "POST" });
     const data = await response.json();
     setOrderId(data.orderId);
@@ -238,6 +240,7 @@ export default function HomePage() {
             recommendationVersion: data.recommendationVersion,
             recommendationActionToken: data.recommendationActionToken,
           });
+          if (typeof data.intentVersion === "number") setIntentVersion(data.intentVersion);
           if (data.state !== "AWAITING_APPROVAL") setQuote(null);
           setFitScores(Object.fromEntries((data.fitScores ?? []).map((score: { productId: string; fitScore: number; note: string }) => [score.productId, score])));
           setMachineSpend(data.machineSpend ?? null);
@@ -318,14 +321,72 @@ export default function HomePage() {
   );
 
   const handleChipEdit = useCallback(
-    (key: string, newValue: string) => {
-      setIntent((prev) => prev.map((f) => f.key === key ? { ...f, value: newValue, label: newValue } : f));
-      const field = intent.find((f) => f.key === key);
-      if (field) {
-        void send(`Change ${field.label} to ${newValue}`);
+    async (key: string, newValue: string) => {
+      if (!orderId) return;
+      setBusy(true);
+      setErrorMsg(null);
+      try {
+        // Build structured patch from chip key and new value
+        const patch: Record<string, unknown> = {};
+        if (key === "budget") {
+          const match = newValue.replace(/,/g, "").match(/(\d+)/);
+          if (match) patch.maxAmountMinor = Math.round(Number(match[1]) * 100);
+        } else if (key === "size") {
+          patch.size = newValue;
+        } else if (key === "colour") {
+          patch.colour = newValue;
+        } else if (key === "useCase") {
+          patch.useCase = newValue;
+        } else if (key === "fit") {
+          patch.fit = newValue;
+        } else if (key === "cushioning") {
+          patch.cushioning = newValue;
+        } else if (key === "distance") {
+          const match = newValue.match(/(\d+)/);
+          if (match) patch.distanceKm = Number(match[1]);
+        } else if (key === "returnable") {
+          patch.mustBeReturnable = /true|yes|returnable/i.test(newValue);
+        }
+
+        const response = await fetch("/api/intent-patch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId, intentPatch: patch, expectedIntentVersion: intentVersion }),
+        });
+        const data = await response.json();
+
+        if (data.ok) {
+          // Sync from server response — never restore stale client intent
+          if (data.parsedIntent) {
+            const intent = data.parsedIntent;
+            const newFields: IntentField[] = [];
+            if (intent.size) newFields.push({ key: "size", label: intent.size, value: intent.size, kind: "requirement", editable: true });
+            if (intent.maxAmountMinor) newFields.push({ key: "budget", label: `Max ₹${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max ₹${(intent.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            if (intent.fit) newFields.push({ key: "fit", label: `${intent.fit} fit`, value: intent.fit, kind: "preference", editable: true });
+            if (intent.cushioning) newFields.push({ key: "cushioning", label: `${intent.cushioning} cushioning`, value: intent.cushioning, kind: "preference", editable: true });
+            if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
+            if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
+            if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
+            setIntent(newFields);
+          }
+          if (typeof data.intentVersion === "number") setIntentVersion(data.intentVersion);
+          setOrderState(data.state);
+          // Invalidate old quote/approval visuals when material change occurred
+          if (data.state !== "AWAITING_APPROVAL") setQuote(null);
+          pushAgent("Updated your requirements. Here are your refreshed options.");
+          void refreshTimeline(orderId);
+        } else {
+          // Failure: retain last confirmed server value, show error
+          pushAgent(`Could not update: ${data.error}`);
+          setErrorMsg(data.error);
+        }
+      } catch {
+        pushAgent("Something went wrong on our side. Please retry.");
+        setErrorMsg("Network error. Please try again.");
       }
+      setBusy(false);
     },
-    [intent, send],
+    [orderId, intentVersion, pushAgent, refreshTimeline],
   );
 
   const approve = useCallback(async () => {

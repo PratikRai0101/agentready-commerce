@@ -47,3 +47,46 @@ describe("parseIntentMessage", () => {
     expect(parsed.size).toBeUndefined();
   });
 });
+
+describe("chip-edit budget correction (bug fix)", () => {
+  it("Change Max ₹5,000 to Max ₹3,000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("Change Max ₹5,000 to Max ₹3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("Change budget from ₹5,000 to ₹3,000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("Change budget from ₹5,000 to ₹3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("Change budget to 3000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("Change budget to 3000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("Set max to Rs. 3,000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("Set max to Rs. 3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("₹5,000 → ₹3,000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("₹5,000 → ₹3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("₹3,000 → ₹3,000 is a no-op (still ₹3,000)", () => {
+    const parsed = parseIntentMessage("₹3,000 → ₹3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("budget to Rs.3000 → ₹3,000", () => {
+    const parsed = parseIntentMessage("budget to Rs.3000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+  });
+
+  it("does not misparse Max ₹5,000 as the target when to-pattern is present", () => {
+    const parsed = parseIntentMessage("Change Max ₹5,000 to Max ₹3,000");
+    expect(parsed.maxAmountMinor).toBe(300_000);
+    expect(parsed.maxAmountMinor).not.toBe(500_000);
+  });
+});
