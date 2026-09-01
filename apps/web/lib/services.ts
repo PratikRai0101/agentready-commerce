@@ -68,7 +68,7 @@ export type EnvelopeRecord = {
 };
 
 export type RespondResult =
-  | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
+  | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState; parsedIntent?: ParsedIntent }
   | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
   | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
@@ -410,7 +410,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         void audit.log({ logicalOrderId: orderId, type: "intent.clarification_requested", actor: "agent",
           summary: replyMessage, inputDigest: intentDigest(session.intent) });
         syncMemory(session.dialogue, session.intent, [], allMissingNames, "clarify", message);
-        const clarifyResult: RespondResult = { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
+        const clarifyResult: RespondResult = { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state, parsedIntent: { ...session.intent } };
         if (operationId) {
           coordinator.complete(operationId, "success", session.state, undefined, clarifyResult);
         }
@@ -1279,7 +1279,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           }
         }
         if (patch.size !== undefined) {
-          if (!SIZES.includes(patch.size)) {
+          if (patch.size !== "" && patch.size !== null && !SIZES.includes(patch.size)) {
             return { ok: false, state: session.state, error: `Invalid size: ${patch.size}`, reasonCodes: ["invalid_size"] };
           }
         }
@@ -1300,15 +1300,57 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const previousIntent = { ...session.intent };
         const previousEnvelope = envelopes.get(orderId);
 
-        // Apply the patch to session intent
+        // Apply the patch to session intent (empty/null clears the field)
         if (patch.maxAmountMinor !== undefined) session.intent.maxAmountMinor = patch.maxAmountMinor;
-        if (patch.size !== undefined) session.intent.size = patch.size;
-        if (patch.colour !== undefined) session.intent.colour = patch.colour;
-        if (patch.useCase !== undefined) session.intent.useCase = patch.useCase;
-        if (patch.fit !== undefined) session.intent.fit = patch.fit;
-        if (patch.cushioning !== undefined) session.intent.cushioning = patch.cushioning;
-        if (patch.distanceKm !== undefined) session.intent.distanceKm = patch.distanceKm;
-        if (patch.mustBeReturnable !== undefined) session.intent.mustBeReturnable = patch.mustBeReturnable;
+        if (patch.size !== undefined) {
+          if (patch.size === "" || patch.size === null) {
+            delete (session.intent as Record<string, unknown>).size;
+          } else {
+            session.intent.size = patch.size;
+          }
+        }
+        if (patch.colour !== undefined) {
+          if (patch.colour === "" || patch.colour === null) {
+            delete (session.intent as Record<string, unknown>).colour;
+          } else {
+            session.intent.colour = patch.colour;
+          }
+        }
+        if (patch.useCase !== undefined) {
+          if (patch.useCase === "" || patch.useCase === null) {
+            delete (session.intent as Record<string, unknown>).useCase;
+          } else {
+            session.intent.useCase = patch.useCase;
+          }
+        }
+        if (patch.fit !== undefined) {
+          if (patch.fit === "" || patch.fit === null) {
+            delete (session.intent as Record<string, unknown>).fit;
+          } else {
+            session.intent.fit = patch.fit;
+          }
+        }
+        if (patch.cushioning !== undefined) {
+          if (patch.cushioning === "" || patch.cushioning === null) {
+            delete (session.intent as Record<string, unknown>).cushioning;
+          } else {
+            session.intent.cushioning = patch.cushioning;
+          }
+        }
+        if (patch.distanceKm !== undefined) {
+          if (patch.distanceKm === 0 || patch.distanceKm === null) {
+            delete (session.intent as Record<string, unknown>).distanceKm;
+          } else {
+            session.intent.distanceKm = patch.distanceKm;
+          }
+        }
+        if (patch.mustBeReturnable !== undefined) {
+          if (!patch.mustBeReturnable) {
+            delete (session.intent as Record<string, unknown>).mustBeReturnable;
+          } else {
+            session.intent.mustBeReturnable = patch.mustBeReturnable;
+          }
+        }
 
         // Detect material change and invalidate
         const materialChange = hasIntentChanged(previousIntent, session.intent);

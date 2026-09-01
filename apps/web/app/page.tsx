@@ -228,11 +228,22 @@ export default function HomePage() {
           pushAgent(data.message);
           setQuestions(data.questions);
           setQuickReplies(data.quickReplies);
-          // Keep existing intent fields, add unresolved from questions
-          newFields.push(...intent.filter((f) => f.kind !== "unresolved"));
-          for (const q of data.questions) {
-            newFields.push({ key: `unresolved_${q}`, label: q, value: "", kind: "unresolved", editable: false });
+          // Keep existing intent fields, merge server parsedIntent, add unresolved from questions
+          const existingByKey = new Map(intent.map((f) => [f.key, f]));
+          if (data.parsedIntent) {
+            const parsed = data.parsedIntent;
+            if (parsed.size) existingByKey.set("size", { key: "size", label: parsed.size, value: parsed.size, kind: "requirement", editable: true });
+            if (parsed.maxAmountMinor) existingByKey.set("budget", { key: "budget", label: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, value: `Max \u20B9${(parsed.maxAmountMinor / 100).toLocaleString("en-IN")}`, kind: "requirement", editable: true });
+            if (parsed.fit) existingByKey.set("fit", { key: "fit", label: `${parsed.fit} fit`, value: parsed.fit, kind: "preference", editable: true });
+            if (parsed.cushioning) existingByKey.set("cushioning", { key: "cushioning", label: `${parsed.cushioning} cushioning`, value: parsed.cushioning, kind: "preference", editable: true });
+            if (parsed.distanceKm) existingByKey.set("distance", { key: "distance", label: `~${parsed.distanceKm}K distance`, value: String(parsed.distanceKm), kind: "preference", editable: true });
+            if (parsed.colour) existingByKey.set("colour", { key: "colour", label: parsed.colour, value: parsed.colour, kind: "preference", editable: true });
+            if (parsed.mustBeReturnable) existingByKey.set("returnable", { key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
           }
+          for (const q of data.questions) {
+            existingByKey.set(`unresolved_${q}`, { key: `unresolved_${q}`, label: q, value: "", kind: "unresolved", editable: false });
+          }
+          newFields.push(...existingByKey.values());
         } else if (data.kind === "shortlist") {
           pushAgent(data.message);
           setMatches(data.matches);
