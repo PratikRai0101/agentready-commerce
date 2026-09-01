@@ -370,7 +370,13 @@ export default function HomePage() {
           setMatches(data.matches ?? []);
           if (data.recommendationBinding) setRecommendationBinding(data.recommendationBinding);
           if (data.state !== "AWAITING_APPROVAL") setQuote(null);
-          pushAgent(`Removed ${key}. Here are your refreshed options.`);
+          if (data.matches && data.matches.length > 0) {
+            pushAgent(`Removed ${key}. Here are your refreshed options.`);
+          } else if (data.state === "CLARIFYING") {
+            pushAgent(`Removed ${key}. I need a bit more information before I can recommend anything.`);
+          } else {
+            pushAgent(`Removed ${key}. Here are your refreshed options.`);
+          }
           void refreshTimeline(orderId);
         } else {
           pushAgent(`Could not remove: ${data.error}`);
@@ -430,7 +436,14 @@ export default function HomePage() {
             if (intent.distanceKm) newFields.push({ key: "distance", label: `~${intent.distanceKm}K distance`, value: String(intent.distanceKm), kind: "preference", editable: true });
             if (intent.colour) newFields.push({ key: "colour", label: intent.colour, value: intent.colour, kind: "preference", editable: true });
             if (intent.mustBeReturnable) newFields.push({ key: "returnable", label: "Returnable", value: "true", kind: "requirement", editable: true });
-            setIntent(newFields);
+          // Add unresolved chips for missing required constraints
+          if (!newFields.some((f) => f.key === "size")) {
+            newFields.push({ key: "unresolved_size", label: "Shoe size (e.g. UK 9)", value: "", kind: "unresolved", editable: false });
+          }
+          if (!newFields.some((f) => f.key === "useCase")) {
+            newFields.push({ key: "unresolved_useCase", label: "Primary use (road, trail, gym, casual)", value: "", kind: "unresolved", editable: false });
+          }
+          setIntent(newFields);
           }
           if (typeof data.intentVersion === "number") setIntentVersion(data.intentVersion);
           setOrderState(data.state);
