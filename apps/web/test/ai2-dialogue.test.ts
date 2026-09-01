@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { getServices, type AppServices } from "../lib/services";
+import type { LlmProvider } from "../lib/llm";
 
 const env: NodeJS.ProcessEnv = {
   NODE_ENV: "test",
   RAZORPAY_KEY_ID: "rzp_test_mock",
   RAZORPAY_KEY_SECRET: "mock_secret",
   ENVELOPE_SIGNING_SECRET: "test-secret",
+};
+
+const DISABLED_LLM: LlmProvider = {
+  name: "none", enabled: false,
+  extractSoftPreferences: async () => null,
+  explainRecommendation: async () => null,
+  interpret: async () => ({ ok: false, reason: "disabled" as const }),
 };
 
 function start(services: AppServices) {
@@ -65,15 +73,15 @@ describe("AI-2 multi-turn dialogue — required scenarios", () => {
   });
 
   it("refine budget after shortlist", async () => {
-    const s = getServices(env, { skipCache: true });
-    const session = start(s);
-    await s.respond(session.logicalOrderId, "black shoes under ₹5,000");
-    await s.respond(session.logicalOrderId, "UK 9");
-    await s.respond(session.logicalOrderId, "road");
-    const r1 = await s.respond(session.logicalOrderId, "show me something cheaper");
-    expect(r1.kind).toBe("shortlist");
-    if (r1.kind !== "shortlist") throw new Error("expected shortlist");
-    expect(session.intent.maxAmountMinor).toBeLessThan(500_000);
+    const svc = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(svc);
+    await svc.respond(session.logicalOrderId, "black shoes under ₹5,000");
+    await svc.respond(session.logicalOrderId, "UK 9");
+    await svc.respond(session.logicalOrderId, "road");
+    const r1 = await svc.respond(session.logicalOrderId, "show me something cheaper");
+    expect(r1.kind).toBe("cheaper");
+    if (r1.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(r1.message).toContain("₹");
   });
 
   it("compare two valid products from the shortlist", async () => {
@@ -133,21 +141,23 @@ describe("AI-2 multi-turn dialogue — required scenarios", () => {
     await s.respond(session.logicalOrderId, "UK 9");
     await s.respond(session.logicalOrderId, "road");
     const r = await s.respond(session.logicalOrderId, "show me something cheaper");
-    expect(r.kind).toBe("shortlist");
-    if (r.kind !== "shortlist") throw new Error("expected shortlist");
-    expect(session.intent.maxAmountMinor).toBeLessThan(500_000);
+    expect(r.kind).toBe("cheaper");
+    if (r.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(r.message).toContain("₹");
+    expect(r.message.length).toBeGreaterThan(20);
   });
 
   it("no cheaper eligible product", async () => {
-    const s = getServices(env, { skipCache: true });
-    const session = start(s);
-    await s.respond(session.logicalOrderId, "black shoes under ₹2,500");
-    await s.respond(session.logicalOrderId, "UK 9");
-    await s.respond(session.logicalOrderId, "road");
-    const r = await s.respond(session.logicalOrderId, "show me something cheaper");
-    expect(r.kind).toBe("shortlist");
-    if (r.kind !== "shortlist") throw new Error("expected shortlist");
-    expect(r.matches.length).toBe(0);
+    const svc = getServices(env, { skipCache: true, llm: DISABLED_LLM });
+    const session = start(svc);
+    await svc.respond(session.logicalOrderId, "black shoes under ₹2,500");
+    await svc.respond(session.logicalOrderId, "UK 9");
+    await svc.respond(session.logicalOrderId, "road");
+    const r = await svc.respond(session.logicalOrderId, "show me something cheaper");
+    expect(r.kind).toBe("cheaper");
+    if (r.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(r.cheaperOption).toBeNull();
+    expect(r.message.toLowerCase()).toMatch(/no eligible|no products/);
   });
 
   it("what am I compromising", async () => {
@@ -312,7 +322,9 @@ describe("AI-2 acceptance demo — full conversation path", () => {
 
     // 7. Ask for a cheaper option
     const r7 = await s.respond(session.logicalOrderId, "show me something cheaper");
-    expect(r7.kind).toBe("shortlist");
+    expect(r7.kind).toBe("cheaper");
+    if (r7.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(r7.message).toContain("₹");
 
     // 8. Select an eligible product
     const r8 = await s.respond(session.logicalOrderId, "Select Streak 4.");

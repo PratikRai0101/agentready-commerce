@@ -302,13 +302,17 @@ describe("AI-3 acceptance demo — full conversation path", () => {
 
     // 5. Cheaper option
     const r7 = await s.respond(session.logicalOrderId, "show me something cheaper");
-    expect(r7.kind).toBe("shortlist");
+    expect(r7.kind).toBe("cheaper");
+    if (r7.kind !== "cheaper") throw new Error("expected cheaper");
+    expect(r7.message).toContain("₹");
+    expect(r7.message.length).toBeGreaterThan(30);
 
     // 6. x402 audit
     const events = await s.timeline(session.logicalOrderId);
     const spend = events.find((e) => e.type === "machine.paid_resource");
     expect(spend).toBeDefined();
-    expect(spend!.externalReferences.purpose).toBe("fit_scoring");
-    expect(spend!.externalReferences.mandateEvidence).toBe("demo_preauthorized_0.01_USDC");
+    expect(spend!.externalReferences?.purpose).toBe("fit_scoring");
+    expect(spend!.externalReferences?.settlementMode).toBe("mock");
+    expect(spend!.externalReferences?.mandateMaximum).toContain("USDC");
   });
 });

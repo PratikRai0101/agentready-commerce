@@ -174,6 +174,8 @@ export default function HomePage() {
           pushAgent(`Comparing ${productA.product.name} vs ${productB.product.name}: ${diffText}`);
         } else if (data.kind === "explain") {
           pushAgent(data.explanation);
+        } else if (data.kind === "cheaper") {
+          pushAgent(data.message);
         } else if (data.kind === "select") {
           await chooseProduct(data.productId);
         } else if (data.kind === "restart") {

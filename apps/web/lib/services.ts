@@ -60,6 +60,7 @@ export type RespondResult =
   | { kind: "error"; message: string; state: OrderState }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
   | { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState }
+  | { kind: "cheaper"; currentBest: ProductMatch; cheaperOption: ProductMatch | null; message: string; state: OrderState }
   | { kind: "select"; productId: string; state: OrderState }
   | { kind: "restart"; state: OrderState };
 
@@ -267,6 +268,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         case "search":
         case "refine":
           break;
+      }
+
+      // ── Cheaper request: grounded response with actual product and savings ──
+      if (/\bcheaper\b|\bcheapest\b|\blower\s+price\b|\bless\s+expensive\b/.test(message.toLowerCase())) {
+        return handleCheaper(session, audit, orderId, llm);
       }
 
       // ── Search / Refine: rank products or ask clarification ──
@@ -999,7 +1005,54 @@ function handleSelect(
   return { kind: "select", productId, state: session.state };
 }
 
-/* ── AI-1 interpretation merge + apply (deterministic code authoritative) ── */
+function handleCheaper(
+  session: Session,
+  audit: ReturnType<typeof createAuditLedger>,
+  orderId: string,
+  llm: LlmProvider,
+): { kind: "cheaper"; currentBest: ProductMatch; cheaperOption: ProductMatch | null; message: string; state: OrderState } {
+  const ranking = session.lastRanking;
+  if (!ranking || ranking.matches.length === 0) {
+    return { kind: "cheaper", currentBest: { product: SHOE_CATALOG.products[0]!, score: 0, scoreNormalized: 0, role: "none", roleJustification: "", matchedRequirements: [], matchedPreferences: [], compromises: [], eligibility: { withinBudget: false, sizeAvailable: false, inStock: false, returnable: false, deliveryMet: false, rejectionReasons: [] }, colourMatched: false }, cheaperOption: null, message: "No products available to compare against.", state: session.state };
+  }
+
+  const currentBest = ranking.matches[0]!;
+  const currentBudget = session.intent.maxAmountMinor ?? 500_000;
+  const reducedBudget = Math.max(10_000, Math.round(currentBudget * 0.8));
+
+  // Re-rank with reduced budget to find cheaper options
+  const intent: PurchaseIntent = {
+    merchantId: SHOE_CATALOG.merchantId,
+    category: "running_shoes",
+    hardConstraints: {
+      maxAmountMinor: reducedBudget,
+      currency: "INR",
+      size: session.intent.size,
+      colour: session.intent.colour,
+      useCase: session.intent.useCase as PurchaseIntent["hardConstraints"]["useCase"],
+      mustBeReturnable: session.intent.mustBeReturnable,
+      deliverBy: session.intent.deliverBy,
+    },
+    softPreferences: [
+      { name: "distance", value: String(session.intent.distanceKm ?? 0), weight: 1 },
+      { name: "fit", value: session.intent.fit ?? "", weight: 1 },
+      { name: "cushioning", value: session.intent.cushioning ?? "", weight: 1 },
+    ],
+  };
+
+  const cheaperRanking = rankProducts(intent, SHOE_CATALOG);
+  const cheaperOption = cheaperRanking.matches.find((m) => m.product.productId !== currentBest.product.productId) ?? null;
+
+  const message = renderCheaper(currentBest, cheaperOption, reducedBudget);
+
+  void audit.log({
+    logicalOrderId: orderId, type: "action.cheaper", actor: "agent",
+    summary: `Cheaper search: budget reduced from ₹${(currentBudget / 100).toLocaleString("en-IN")} to ₹${(reducedBudget / 100).toLocaleString("en-IN")}. ${cheaperOption ? `Found ${cheaperOption.product.name} at ₹${(cheaperOption.product.priceMinor / 100).toLocaleString("en-IN")}` : "No eligible cheaper option found"}.`,
+    inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["grounded_catalog_facts"],
+  });
+
+  return { kind: "cheaper", currentBest, cheaperOption, message, state: session.state };
+}
 
 /**
  * Precedence policy between deterministic parsing and accepted LLM proposals:
@@ -1130,7 +1183,7 @@ function runFitScoreSpend(
     logicalOrderId: orderId,
     type: "machine.paid_resource",
     actor: "agent",
-    summary: `Paid ${outcome.resource.resourceName} (${outcome.settlement.amount} USDC) via x402 v2 on Solana Devnet — MOCK demo settlement. Pre-authorized by demo mandate for fit-scoring resource.`,
+    summary: `Fit-scoring invoked under a pre-authorized ${DEFAULT_MACHINE_SPEND.amountMinor / 1_000_000} USDC x402 mandate — MOCK settlement; no real funds moved.`,
     externalReferences: {
       network: outcome.settlement.network,
       paymentIdentifier,
@@ -1138,7 +1191,12 @@ function runFitScoreSpend(
       payee: DEFAULT_MACHINE_SPEND.payeeWallet,
       mock: "true",
       purpose: "fit_scoring",
-      mandateEvidence: "demo_preauthorized_0.01_USDC",
+      mandateMaximum: `${DEFAULT_MACHINE_SPEND.amountMinor / 1_000_000} USDC`,
+      requestedAmount: `${outcome.settlement.amount} USDC`,
+      settlementMode: "mock",
+      requestDigest: envelopeHash,
+      invocationStatus: "success",
+      replayDedupStatus: "first_invocation",
     },
     decision: "allow",
     reasonCodes: ["x402_mock_settlement_verified", "machine_tool_spend", "demo_preauthorized"],
@@ -1176,7 +1234,7 @@ async function composeShortlistMessage(
   const best = ranking.matches[0];
   if (!best) return "No products satisfy your constraints with current stock.";
   const spendNote = machineSpend
-    ? ` I spent ${machineSpend.amount} USDC via x402 v2 on Solana Devnet (${machineSpend.mock ? "MOCK demo settlement" : "live settlement"}, tx ${machineSpend.txHash.slice(0, 16)}…) on a premium wide-fit scoring pass — the fit scores below are grounded in that paid resource.`
+    ? ` Fit-scoring invoked under a pre-authorized ${machineSpend.amount} USDC x402 mandate — MOCK settlement; no real funds moved.`
     : "";
   if (llm.enabled) {
     const explanation = await llm.explainRecommendation({
