@@ -1,5 +1,6 @@
 export const OPERATION_TYPES = [
   "session.create",
+  "conversation.respond",
   "quote.build",
   "approval.grant",
   "payment.initiate",
@@ -31,12 +32,21 @@ export type OperationRecord = {
   outcome?: OperationOutcome;
   resultRef?: string;
   errorRef?: string;
+  resultPayload?: unknown;
   createdAt: string;
   updatedAt: string;
 };
 
 export type SessionCreateRequest = {
   customerId: string;
+};
+
+export type ConversationRespondRequest = {
+  orderId: string;
+  message: string;
+  intentVersion: number;
+  recommendationVersion: number;
+  recommendationActionToken: string;
 };
 
 export type QuoteBuildRequest = {
@@ -71,6 +81,7 @@ export type CompensationRefundRequest = {
 
 export type OperationRequest =
   | { type: "session.create"; request: SessionCreateRequest }
+  | { type: "conversation.respond"; request: ConversationRespondRequest }
   | { type: "quote.build"; request: QuoteBuildRequest }
   | { type: "approval.grant"; request: ApprovalGrantRequest }
   | { type: "payment.initiate"; request: PaymentInitiateRequest }

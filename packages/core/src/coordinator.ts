@@ -5,6 +5,7 @@ import type {
   OperationOutcome,
   IdempotencyResult,
   SessionCreateRequest,
+  ConversationRespondRequest,
   QuoteBuildRequest,
   ApprovalGrantRequest,
   PaymentInitiateRequest,
@@ -15,24 +16,27 @@ import type {
 import { canonicalRequestHash } from "./hashing";
 import type { OperationStore } from "./store";
 
+export type OperationRequest =
+  | SessionCreateRequest
+  | ConversationRespondRequest
+  | QuoteBuildRequest
+  | ApprovalGrantRequest
+  | PaymentInitiateRequest
+  | PaymentVerifyRequest
+  | FulfilmentCompleteRequest
+  | CompensationRefundRequest;
+
 export type OperationCoordinator = {
   begin(
     operationId: string,
     operationType: OperationType,
-    request:
-      | SessionCreateRequest
-      | QuoteBuildRequest
-      | ApprovalGrantRequest
-      | PaymentInitiateRequest
-      | PaymentVerifyRequest
-      | FulfilmentCompleteRequest
-      | CompensationRefundRequest,
+    request: OperationRequest,
     aggregateIdentity: string,
   ): IdempotencyResult;
 
   transition(operationId: string, phase: OperationPhase): void;
 
-  complete(operationId: string, outcome: OperationOutcome, resultRef?: string, errorRef?: string): void;
+  complete(operationId: string, outcome: OperationOutcome, resultRef?: string, errorRef?: string, resultPayload?: unknown): void;
 
   lookup(operationId: string): OperationRecord | undefined;
 
@@ -75,13 +79,14 @@ export function createOperationCoordinator(store: OperationStore): OperationCoor
       store.set(operationId, record);
     },
 
-    complete(operationId, outcome, resultRef, errorRef) {
+    complete(operationId, outcome, resultRef, errorRef, resultPayload) {
       const record = store.get(operationId);
       if (!record) throw new Error(`Operation ${operationId} not found`);
       record.phase = outcome === "success" ? "completed" : outcome === "failure" ? "failed" : "rejected";
       record.outcome = outcome;
       if (resultRef !== undefined) record.resultRef = resultRef;
       if (errorRef !== undefined) record.errorRef = errorRef;
+      if (resultPayload !== undefined) record.resultPayload = resultPayload;
       record.updatedAt = new Date().toISOString();
       store.set(operationId, record);
     },

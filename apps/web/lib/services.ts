@@ -26,7 +26,6 @@ import {
   createOperationCoordinator,
   MemoryOperationStore,
   type OperationCoordinator,
-  type IdempotencyResult,
 } from "@agentready/core";
 import { intentDigest, SIZES, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
@@ -192,12 +191,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       if (operationId) {
         const idempotency = coordinator.begin(operationId, "session.create", { customerId }, logicalOrderId);
-        if (idempotency.kind === "replay") {
-          const existing = sessions.get(idempotency.record.aggregateIdentity);
-          if (existing) return existing;
-        }
         if (idempotency.kind === "conflict") {
           throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as Session;
         }
       }
 
@@ -220,7 +218,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         externalReferences: { mandateId: mandate.mandateId },
       });
       if (operationId) {
-        coordinator.complete(operationId, "success", logicalOrderId);
+        coordinator.complete(operationId, "success", logicalOrderId, undefined, session);
       }
       return session;
     },
@@ -239,19 +237,29 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
     async respond(orderId, message, selectionBinding, operationId) {
       return withSessionLock(orderId, async () => {
+      const binding = selectionBinding ?? { intentVersion: 0, recommendationVersion: 0, recommendationActionToken: "" };
       if (operationId) {
-        const idempotency = coordinator.begin(operationId, "session.create", { customerId: DEMO_CUSTOMER }, orderId);
+        const idempotency = coordinator.begin(operationId, "conversation.respond", {
+          orderId,
+          message,
+          intentVersion: binding.intentVersion,
+          recommendationVersion: binding.recommendationVersion,
+          recommendationActionToken: binding.recommendationActionToken,
+        }, orderId);
         if (idempotency.kind === "conflict") {
           return { kind: "error", message: `Operation ID conflict: ${operationId} was already used with a different request`, state: "DRAFT" } as RespondResult;
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          return { kind: "restart", state: session?.state ?? "DRAFT" } as RespondResult;
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as RespondResult;
         }
       }
       const session = sessions.get(orderId);
       if (!session) {
-        return { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
+        const errorResult: RespondResult = { kind: "error", message: "Unknown session. Start a new conversation.", state: "DRAFT" };
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, "Unknown session", errorResult);
+        }
+        return errorResult;
       }
 
       session.message = message;
@@ -349,7 +357,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const ranking = session.lastRanking!;
         const replyMessage = await composeShortlistMessage(session, ranking, undefined, llm);
         syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
-        return {
+        const repeatResult: RespondResult = {
           kind: "shortlist",
           message: replyMessage,
           matches: ranking.matches,
@@ -358,13 +366,21 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           parsedIntent: { ...session.intent },
           ...recommendationBinding(session),
         };
+        if (operationId) {
+          coordinator.complete(operationId, "success", session.state, undefined, repeatResult);
+        }
+        return repeatResult;
       }
 
       // ── Search / Refine: rank products or ask clarification ──
       const canRank = session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED" ||
         (session.state === "AWAITING_APPROVAL" && materialChange);
       if (!canRank) {
-        return { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
+        const stateError: RespondResult = { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
+        if (operationId) {
+          coordinator.complete(operationId, "failure", undefined, `Current state ${session.state} does not accept new product messages.`, stateError);
+        }
+        return stateError;
       }
 
       const intent = buildPurchaseIntent(session);
@@ -380,7 +396,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         void audit.log({ logicalOrderId: orderId, type: "intent.clarification_requested", actor: "agent",
           summary: replyMessage, inputDigest: intentDigest(session.intent) });
         syncMemory(session.dialogue, session.intent, [], allMissingNames, "clarify", message);
-        return { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
+        const clarifyResult: RespondResult = { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
+        if (operationId) {
+          coordinator.complete(operationId, "success", session.state, undefined, clarifyResult);
+        }
+        return clarifyResult;
       }
 
       if (session.state === "AWAITING_APPROVAL" && quoteInvalidated) {
@@ -407,10 +427,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
 
-      if (operationId) {
-        coordinator.complete(operationId, "success", session.state);
-      }
-      return {
+      const respondResult: RespondResult = {
         kind: "shortlist",
         message: (acknowledgement ? acknowledgement + " " : "") + replyMessage,
         matches: ranking.matches,
@@ -420,6 +437,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         parsedIntent: { ...session.intent },
         ...recommendationBinding(session),
       };
+      if (operationId) {
+        coordinator.complete(operationId, "success", session.state, undefined, respondResult);
+      }
+      return respondResult;
       });
     },
 
@@ -430,19 +451,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           throw new Error(`Operation ID conflict: ${operationId} was already used with a different request`);
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const record = envelopes.get(orderId);
-          if (record) {
-            const session = sessions.get(orderId);
-            return {
-              envelope: record.envelope,
-              digest: record.digest,
-              signature: record.signature,
-              state: session?.state ?? "AWAITING_APPROVAL",
-              approvalEventId: session?.approvalEventId,
-              ...record.recommendation,
-            };
-          }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding;
         }
       }
       const session = sessions.get(orderId);
@@ -517,10 +527,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: `Envelope ${digest.slice(0, 16)}… for ${product.name} ${size} — ${formatMinor(total)}`,
         inputDigest: digest,
       });
-      if (operationId) {
-        coordinator.complete(operationId, "success", digest);
-      }
-      return {
+      const quoteResult = {
         envelope,
         digest,
         signature,
@@ -528,6 +535,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         approvalEventId: session.approvalEventId,
         ...binding,
       };
+      if (operationId) {
+        coordinator.complete(operationId, "success", digest, undefined, quoteResult);
+      }
+      return quoteResult;
       });
     },
 
@@ -538,12 +549,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          if (idempotency.record.outcome === "success") {
-            return { ok: true, approvalEventId: idempotency.record.resultRef, state: session?.state ?? "APPROVED" };
-          }
-          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; approvalEventId?: string; state: OrderState; error?: string };
         }
         if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
           const session = sessions.get(orderId);
@@ -587,10 +594,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         decision: "allow",
         reasonCodes: ["approval_binds_hash"],
       });
+      const approveResult = { ok: true, approvalEventId, state: session.state } as const;
       if (operationId) {
-        coordinator.complete(operationId, "success", approvalEventId);
+        coordinator.complete(operationId, "success", approvalEventId, undefined, approveResult);
       }
-      return { ok: true, approvalEventId, state: session.state };
+      return approveResult;
       });
     },
 
@@ -601,22 +609,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request`, reasonCodes: ["operation_conflict"] };
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          if (idempotency.record.outcome === "success") {
-            const attempt: PaymentAttempt = {
-              attemptId: idempotency.record.resultRef ?? "att_replay",
-              logicalOrderId: orderId,
-              rail: "razorpay_checkout",
-              externalOrderId: session?.externalOrderId ?? "",
-              status: "created",
-              createdAt: new Date().toISOString(),
-              amountMinor: 0,
-              currency: "INR",
-            };
-            return { ok: true, attempt, state: session?.state ?? "PAYMENT_PENDING" };
-          }
-          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed", reasonCodes: ["operation_failed"] };
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] };
         }
         if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
           const session = sessions.get(orderId);
@@ -707,10 +701,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           externalReferences: { orderId: attempt.externalOrderId ?? "" },
           decision: "allow",
         });
+        const payResult = { ok: true, attempt, state: session.state } as const;
         if (operationId) {
-          coordinator.complete(operationId, "success", attempt.externalOrderId ?? undefined);
+          coordinator.complete(operationId, "success", attempt.externalOrderId ?? undefined, undefined, payResult);
         }
-        return { ok: true, attempt, state: session.state };
+        return payResult;
       } catch (error) {
         setState(session, "PAYMENT_FAILED");
         void audit.log({
@@ -720,10 +715,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Order creation failed: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
+        const failResult = { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) } as const;
         if (operationId) {
-          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error));
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error), failResult);
         }
-        return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
+        return failResult;
       }
       });
     },
@@ -742,12 +738,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          if (idempotency.record.outcome === "success") {
-            return { ok: true, state: session?.state ?? "PAID_VERIFIED" };
-          }
-          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string };
         }
         if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
           const session = sessions.get(orderId);
@@ -800,10 +792,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["signature_invalid"],
         });
+        const failResult = { ok: false, state: session.state, error: result.reason ?? "Verification failed" } as const;
         if (operationId) {
-          coordinator.complete(operationId, "failure", undefined, result.reason ?? "Verification failed");
+          coordinator.complete(operationId, "failure", undefined, result.reason ?? "Verification failed", failResult);
         }
-        return { ok: false, state: session.state, error: result.reason ?? "Verification failed" };
+        return failResult;
       }
 
       const bindingFailures: string[] = [];
@@ -831,10 +824,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block",
           reasonCodes: ["rail_binding_failed"],
         });
+        const bindFailResult = { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` } as const;
         if (operationId) {
-          coordinator.complete(operationId, "failure", undefined, `Payment binding rejected: ${bindingFailures.join("; ")}`);
+          coordinator.complete(operationId, "failure", undefined, `Payment binding rejected: ${bindingFailures.join("; ")}`, bindFailResult);
         }
-        return { ok: false, state: session.state, error: `Payment binding rejected: ${bindingFailures.join("; ")}` };
+        return bindFailResult;
       }
 
       setState(session, "PAID_VERIFIED");
@@ -852,10 +846,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         servicesReconcileHeld(orderId, session, audit, webhookDedup);
       }
 
+      const verifyResult = { ok: true, state: session.state } as const;
       if (operationId) {
-        coordinator.complete(operationId, "success", externalPaymentId);
+        coordinator.complete(operationId, "success", externalPaymentId, undefined, verifyResult);
       }
-      return { ok: true, state: session.state };
+      return verifyResult;
     },
 
     async fulfil(orderId, fail, operationId) {
@@ -864,12 +859,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          if (idempotency.record.outcome === "success") {
-            return { ok: true, state: session?.state ?? "FULFILLED" };
-          }
-          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string };
         }
         if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
           const session = sessions.get(orderId);
@@ -892,10 +883,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "review",
           reasonCodes: ["inventory_unavailable"],
         });
+        const fulfilFailResult = { ok: false, state: session.state, error: "Simulated fulfilment failure: inventory unavailable" } as const;
         if (operationId) {
-          coordinator.complete(operationId, "failure", undefined, "Simulated fulfilment failure: inventory unavailable");
+          coordinator.complete(operationId, "failure", undefined, "Simulated fulfilment failure: inventory unavailable", fulfilFailResult);
         }
-        return { ok: false, state: session.state, error: "Simulated fulfilment failure: inventory unavailable" };
+        return fulfilFailResult;
       }
       setState(session, "FULFILLED");
       void audit.log({
@@ -905,10 +897,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         summary: "Order shipped",
         decision: "allow",
       });
+      const fulfilSuccessResult = { ok: true, state: session.state } as const;
       if (operationId) {
-        coordinator.complete(operationId, "success", orderId);
+        coordinator.complete(operationId, "success", orderId, undefined, fulfilSuccessResult);
       }
-      return { ok: true, state: session.state };
+      return fulfilSuccessResult;
     },
 
     async compensate(orderId, operationId) {
@@ -917,12 +910,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         if (idempotency.kind === "conflict") {
           return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
         }
-        if (idempotency.kind === "replay" && idempotency.record.phase === "completed") {
-          const session = sessions.get(orderId);
-          if (idempotency.record.outcome === "success") {
-            return { ok: true, state: session?.state ?? "REFUNDED", refundId: idempotency.record.resultRef };
-          }
-          return { ok: false, state: session?.state ?? "DRAFT", error: idempotency.record.errorRef ?? "Operation previously failed" };
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string; refundId?: string };
         }
         if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
           const session = sessions.get(orderId);
@@ -960,10 +949,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "allow",
           reasonCodes: ["paid_fulfilment_failure_refunded"],
         });
+        const refundResult = { ok: true, state: session.state, refundId: result.refundId } as const;
         if (operationId) {
-          coordinator.complete(operationId, "success", result.refundId ?? undefined);
+          coordinator.complete(operationId, "success", result.refundId ?? undefined, undefined, refundResult);
         }
-        return { ok: true, state: session.state, refundId: result.refundId };
+        return refundResult;
       } catch (error) {
         setState(session, "MANUAL_REVIEW");
         void audit.log({
@@ -973,10 +963,11 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           summary: `Refund failed; routed to manual review: ${error instanceof Error ? error.message : String(error)}`,
           decision: "review",
         });
+        const refundFailResult = { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) } as const;
         if (operationId) {
-          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error));
+          coordinator.complete(operationId, "failure", undefined, error instanceof Error ? error.message : String(error), refundFailResult);
         }
-        return { ok: false, state: session.state, error: error instanceof Error ? error.message : String(error) };
+        return refundFailResult;
       }
     },
 

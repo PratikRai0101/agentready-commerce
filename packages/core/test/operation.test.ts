@@ -27,6 +27,25 @@ describe("canonicalRequestHash", () => {
     const h2 = canonicalRequestHash("payment.initiate", { orderId: "cust_1", rail: "razorpay_checkout" });
     expect(h1).not.toBe(h2);
   });
+
+  it("conversation.respond hashes orderId + message + binding", () => {
+    const h1 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "hello", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" });
+    const h2 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "hello", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" });
+    expect(h1).toBe(h2);
+    expect(h1).toHaveLength(64);
+  });
+
+  it("conversation.respond differs for different messages", () => {
+    const h1 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" });
+    const h2 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "red shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" });
+    expect(h1).not.toBe(h2);
+  });
+
+  it("conversation.respond differs for different bindings", () => {
+    const h1 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "hello", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok_a" });
+    const h2 = canonicalRequestHash("conversation.respond", { orderId: "ord_1", message: "hello", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok_b" });
+    expect(h1).not.toBe(h2);
+  });
 });
 
 describe("OperationCoordinator", () => {
@@ -120,6 +139,61 @@ describe("OperationCoordinator", () => {
   });
 });
 
+describe("resultPayload storage and replay", () => {
+  it("stores and replays typed result for session.create", () => {
+    const { coordinator } = makeCoordinator();
+    const session = { logicalOrderId: "ord_1", customerId: "cust_1", state: "DRAFT" };
+    coordinator.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    coordinator.complete("op_1", "success", "ord_1", undefined, session);
+
+    const replay = coordinator.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.resultPayload).toEqual(session);
+    }
+  });
+
+  it("stores and replays typed result for conversation.respond", () => {
+    const { coordinator } = makeCoordinator();
+    const result = { kind: "shortlist" as const, message: "Here are matches", matches: [], state: "QUOTED" as const, intentVersion: 1, recommendationVersion: 1, recommendationActionToken: "tok" };
+    coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 1, recommendationActionToken: "tok" }, "ord_1");
+    coordinator.complete("op_1", "success", "QUOTED", undefined, result);
+
+    const replay = coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 1, recommendationActionToken: "tok" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.resultPayload).toEqual(result);
+    }
+  });
+
+  it("stores and replays typed result for payment.initiate", () => {
+    const { coordinator } = makeCoordinator();
+    const result = { ok: true, attempt: { attemptId: "att_1", externalOrderId: "rzp_1" }, state: "PAYMENT_PENDING" };
+    coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    coordinator.complete("op_1", "success", "rzp_1", undefined, result);
+
+    const replay = coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.resultPayload).toEqual(result);
+    }
+  });
+
+  it("stores and replays typed failure result", () => {
+    const { coordinator } = makeCoordinator();
+    const result = { ok: false, state: "PAYMENT_FAILED", error: "Gateway timeout" };
+    coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    coordinator.complete("op_1", "failure", undefined, "Gateway timeout", result);
+
+    const replay = coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.resultPayload).toEqual(result);
+      expect(replay.record.outcome).toBe("failure");
+    }
+  });
+});
+
 describe("EncryptedOperationStore", () => {
   it("round-trips records through encryption", () => {
     const store = new EncryptedOperationStore("test-secret-key-for-encryption");
@@ -139,7 +213,6 @@ describe("EncryptedOperationStore", () => {
 
   it("data is not stored as plaintext", () => {
     const store = new EncryptedOperationStore("test-secret-key-for-encryption");
-    // Access internal data via cast to verify encryption
     const internals = store as unknown as { data: Map<string, string> };
     const coordinator = createOperationCoordinator(store);
     coordinator.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
@@ -150,7 +223,7 @@ describe("EncryptedOperationStore", () => {
   });
 });
 
-describe("schema migration from empty store", () => {
+describe("process-local store initialization", () => {
   it("initializes a fresh store and supports full lifecycle", () => {
     const store = new MemoryOperationStore();
     const coordinator = createOperationCoordinator(store);
@@ -166,16 +239,45 @@ describe("schema migration from empty store", () => {
     coordinator.begin("op_3", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
     expect(store.size()).toBe(3);
   });
+
+  it("same coordinator instance provides process-local idempotency", () => {
+    const { coordinator } = makeCoordinator();
+    coordinator.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    coordinator.complete("op_1", "success", "ord_1");
+
+    const replay = coordinator.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+  });
+
+  it("new coordinator backed by same store sees existing records", () => {
+    const store = new MemoryOperationStore();
+    const c1 = createOperationCoordinator(store);
+    c1.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    c1.complete("op_1", "success", "ord_1");
+
+    const c2 = createOperationCoordinator(store);
+    const replay = c2.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+  });
+
+  it("new coordinator backed by different store does NOT see existing records (no restart survival)", () => {
+    const { coordinator: c1 } = makeCoordinator();
+    c1.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    c1.complete("op_1", "success", "ord_1");
+
+    const { coordinator: c2 } = makeCoordinator();
+    const result = c2.begin("op_1", "session.create", { customerId: "cust_1" }, "ord_1");
+    expect(result.kind).toBe("new");
+  });
 });
 
 describe("P0 idempotency scenarios", () => {
-  it("same ID and same request returns existing result", () => {
+  it("same ID and same request returns existing result with payload", () => {
     const { coordinator } = makeCoordinator();
-    const first = coordinator.begin("op_retry", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
-    expect(first.kind).toBe("new");
-
+    const payload = { ok: true, state: "PAYMENT_PENDING", attempt: { id: "att_1" } };
+    coordinator.begin("op_retry", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
     coordinator.transition("op_retry", "in_progress");
-    coordinator.complete("op_retry", "success", "pay_123");
+    coordinator.complete("op_retry", "success", "pay_123", undefined, payload);
 
     const replay = coordinator.begin("op_retry", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
     expect(replay.kind).toBe("replay");
@@ -183,14 +285,44 @@ describe("P0 idempotency scenarios", () => {
       expect(replay.record.phase).toBe("completed");
       expect(replay.record.outcome).toBe("success");
       expect(replay.record.resultRef).toBe("pay_123");
+      expect(replay.record.resultPayload).toEqual(payload);
     }
   });
 
-  it("same ID and different request fails with conflict", () => {
+  it("same ID and different request fails with conflict before any effect", () => {
     const { coordinator } = makeCoordinator();
     coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
 
     const conflict = coordinator.begin("op_1", "payment.initiate", { orderId: "ord_1", rail: "x402_solana" }, "ord_1");
+    expect(conflict.kind).toBe("conflict");
+  });
+
+  it("conversation.respond: same ID + same message + same binding returns replay", () => {
+    const { coordinator } = makeCoordinator();
+    const result = { kind: "shortlist" as const, message: "matches", matches: [], state: "QUOTED" as const, intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" };
+    coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" }, "ord_1");
+    coordinator.complete("op_1", "success", "QUOTED", undefined, result);
+
+    const replay = coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.resultPayload).toEqual(result);
+    }
+  });
+
+  it("conversation.respond: same ID + different message produces conflict", () => {
+    const { coordinator } = makeCoordinator();
+    coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" }, "ord_1");
+
+    const conflict = coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "red shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok" }, "ord_1");
+    expect(conflict.kind).toBe("conflict");
+  });
+
+  it("conversation.respond: same ID + different binding produces conflict", () => {
+    const { coordinator } = makeCoordinator();
+    coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok_a" }, "ord_1");
+
+    const conflict = coordinator.begin("op_1", "conversation.respond", { orderId: "ord_1", message: "black shoes", intentVersion: 1, recommendationVersion: 2, recommendationActionToken: "tok_b" }, "ord_1");
     expect(conflict.kind).toBe("conflict");
   });
 
@@ -209,7 +341,7 @@ describe("P0 idempotency scenarios", () => {
     }
   });
 
-  it("concurrent duplicate submission is handled via session lock pattern", () => {
+  it("concurrent duplicate submission: first is new, rest are replays", () => {
     const { coordinator } = makeCoordinator();
     const results = [
       coordinator.begin("op_concurrent", "session.create", { customerId: "cust_1" }, "ord_1"),
@@ -222,23 +354,39 @@ describe("P0 idempotency scenarios", () => {
     expect(results[2]!.kind).toBe("replay");
   });
 
-  it("restart with a pending operation returns pending replay", () => {
+  it("concurrent duplicates of same operation produce only one effect", () => {
     const { coordinator } = makeCoordinator();
-    coordinator.begin("op_restart", "session.create", { customerId: "cust_1" }, "ord_1");
-    coordinator.transition("op_restart", "in_progress");
+    let effectCount = 0;
+    const results = [
+      coordinator.begin("op_effect", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1"),
+      coordinator.begin("op_effect", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1"),
+      coordinator.begin("op_effect", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1"),
+    ];
 
-    const restart = coordinator.begin("op_restart", "session.create", { customerId: "cust_1" }, "ord_1");
-    expect(restart.kind).toBe("replay");
-    if (restart.kind === "replay") {
-      expect(restart.record.phase).toBe("in_progress");
+    for (const r of results) {
+      if (r.kind === "new") effectCount += 1;
+    }
+    expect(effectCount).toBe(1);
+  });
+
+  it("pending in-progress operation returns replay with in_progress phase", () => {
+    const { coordinator } = makeCoordinator();
+    coordinator.begin("op_inprogress", "session.create", { customerId: "cust_1" }, "ord_1");
+    coordinator.transition("op_inprogress", "in_progress");
+
+    const replay = coordinator.begin("op_inprogress", "session.create", { customerId: "cust_1" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.phase).toBe("in_progress");
     }
   });
 
-  it("completed-result replay returns the cached outcome", () => {
+  it("completed-result replay returns the stored payload (not a re-execution)", () => {
     const { coordinator } = makeCoordinator();
+    const payload = { ok: true, state: "FULFILLED" };
     coordinator.begin("op_done", "fulfilment.complete", { orderId: "ord_1", fail: false }, "ord_1");
     coordinator.transition("op_done", "in_progress");
-    coordinator.complete("op_done", "success", "ful_123");
+    coordinator.complete("op_done", "success", "ful_123", undefined, payload);
 
     const replay = coordinator.begin("op_done", "fulfilment.complete", { orderId: "ord_1", fail: false }, "ord_1");
     expect(replay.kind).toBe("replay");
@@ -246,6 +394,37 @@ describe("P0 idempotency scenarios", () => {
       expect(replay.record.phase).toBe("completed");
       expect(replay.record.outcome).toBe("success");
       expect(replay.record.resultRef).toBe("ful_123");
+      expect(replay.record.resultPayload).toEqual(payload);
+    }
+  });
+
+  it("failed outcome replay returns the stored failure payload", () => {
+    const { coordinator } = makeCoordinator();
+    const failPayload = { ok: false, state: "PAYMENT_FAILED", error: "Gateway timeout" };
+    coordinator.begin("op_fail", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    coordinator.complete("op_fail", "failure", undefined, "Gateway timeout", failPayload);
+
+    const replay = coordinator.begin("op_fail", "payment.initiate", { orderId: "ord_1", rail: "razorpay_checkout" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.phase).toBe("failed");
+      expect(replay.record.outcome).toBe("failure");
+      expect(replay.record.resultPayload).toEqual(failPayload);
+    }
+  });
+
+  it("rejected outcome replay returns the stored rejection payload", () => {
+    const { coordinator } = makeCoordinator();
+    const rejectPayload = { ok: false, state: "APPROVED", error: "Policy blocked" };
+    coordinator.begin("op_rej", "approval.grant", { orderId: "ord_1", digest: "abc" }, "ord_1");
+    coordinator.complete("op_rej", "rejected", undefined, "Policy blocked", rejectPayload);
+
+    const replay = coordinator.begin("op_rej", "approval.grant", { orderId: "ord_1", digest: "abc" }, "ord_1");
+    expect(replay.kind).toBe("replay");
+    if (replay.kind === "replay") {
+      expect(replay.record.phase).toBe("rejected");
+      expect(replay.record.outcome).toBe("rejected");
+      expect(replay.record.resultPayload).toEqual(rejectPayload);
     }
   });
 
@@ -258,7 +437,7 @@ describe("P0 idempotency scenarios", () => {
       if (result.kind === "new") {
         effectCount += 1;
         coordinator.transition(operationId, "in_progress");
-        coordinator.complete(operationId, "success", "pay_new");
+        coordinator.complete(operationId, "success", "pay_new", undefined, { ok: true });
       }
       return result;
     }
@@ -314,6 +493,12 @@ describe("all operation types", () => {
     expect(r.kind).toBe("new");
   });
 
+  it("supports conversation.respond", () => {
+    const { coordinator } = makeCoordinator();
+    const r = coordinator.begin("op_cr", "conversation.respond", { orderId: "ord_1", message: "hello", intentVersion: 1, recommendationVersion: 1, recommendationActionToken: "tok" }, "ord_1");
+    expect(r.kind).toBe("new");
+  });
+
   it("supports quote.build", () => {
     const { coordinator } = makeCoordinator();
     const r = coordinator.begin("op_qb", "quote.build", { orderId: "ord_1", productId: "p1" }, "ord_1");
@@ -346,7 +531,7 @@ describe("all operation types", () => {
 
   it("supports compensation.refund", () => {
     const { coordinator } = makeCoordinator();
-    const r = coordinator.begin("op_cr", "compensation.refund", { orderId: "ord_1" }, "ord_1");
+    const r = coordinator.begin("op_cr2", "compensation.refund", { orderId: "ord_1" }, "ord_1");
     expect(r.kind).toBe("new");
   });
 });
