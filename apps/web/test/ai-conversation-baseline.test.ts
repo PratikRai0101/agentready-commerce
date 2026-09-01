@@ -383,9 +383,9 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     await services.respond(session.logicalOrderId, "UK 9");
     await services.respond(session.logicalOrderId, "road");
     const result = await services.respond(session.logicalOrderId, "compare Streak 4 and Stride Lite");
-    expect(result.kind).toBe("pending");
-    if (result.kind !== "pending") throw new Error("expected pending");
-    expect(result.action).toBe("compare");
+    expect(result.kind).toBe("compare");
+    if (result.kind !== "compare") throw new Error("expected compare");
+    expect(result.productA.product.productId).toBe("p_streak_4");
   });
 
   it("'why this one?' follow-up is interpreted as an explain action (AI-1)", async () => {
@@ -395,9 +395,9 @@ describe("AI-0 baseline — refinement and follow-ups", () => {
     await services.respond(session.logicalOrderId, "UK 9");
     await services.respond(session.logicalOrderId, "road");
     const result = await services.respond(session.logicalOrderId, "why this one?");
-    expect(result.kind).toBe("pending");
-    if (result.kind !== "pending") throw new Error("expected pending");
-    expect(result.action).toBe("explain");
+    expect(result.kind).toBe("explain");
+    if (result.kind !== "explain") throw new Error("expected explain");
+    expect(result.match.product.productId).toBe("p_vista_max");
   });
 
   it("'show me something cheaper' does not produce a cheaper alternative (defect L4)", async () => {

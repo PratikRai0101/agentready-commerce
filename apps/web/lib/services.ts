@@ -26,6 +26,7 @@ import { intentDigest, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
+import { createDialogueMemory, syncMemory, invalidateQuote, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
 
 export type Session = {
   logicalOrderId: string;
@@ -42,6 +43,7 @@ export type Session = {
   compensation?: { refundId?: string; reason?: string; ok: boolean };
   machineSpend?: { paymentIdentifier: string; settlementHash: string; fitScores: FitScore[] };
   heldWebhook?: { eventId: string; paymentId: string; orderId: string };
+  dialogue: DialogueMemory;
 };
 
 export type EnvelopeRecord = {
@@ -55,7 +57,8 @@ export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState }
   | { kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState }
   | { kind: "error"; message: string; state: OrderState }
-  | { kind: "pending"; action: "compare" | "explain"; message: string; productIds?: string[]; state: OrderState }
+  | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
+  | { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState }
   | { kind: "select"; productId: string; state: OrderState }
   | { kind: "restart"; state: OrderState };
 
@@ -163,6 +166,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         state: "DRAFT",
         message: "",
         intent: {},
+        dialogue: createDialogueMemory(),
       };
       sessions.set(logicalOrderId, session);
       void audit.log({
@@ -199,6 +203,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       const deterministic = deterministicInterpretation(message, session.intent);
       const outcome = await interpretUserMessage(message, session.intent, llm);
       const merged = mergeInterpretation(deterministic, outcome);
+      const hadQuoteBefore = session.dialogue.quoteValid;
       applyInterpretation(session, merged);
 
       // Legacy soft-preference enrichment only when AI-1 fell back to
@@ -208,145 +213,113 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         const soft = await llm.extractSoftPreferences(message);
         if (soft) {
           const applied: string[] = [];
-          if (soft.fit && !session.intent.fit) {
-            session.intent.fit = soft.fit;
-            applied.push("fit");
-          }
-          if (soft.cushioning && !session.intent.cushioning) {
-            session.intent.cushioning = soft.cushioning;
-            applied.push("cushioning");
-          }
-          if (soft.distanceKm !== undefined && !session.intent.distanceKm) {
-            session.intent.distanceKm = soft.distanceKm;
-            applied.push("distanceKm");
-          }
+          if (soft.fit && !session.intent.fit) { session.intent.fit = soft.fit; applied.push("fit"); }
+          if (soft.cushioning && !session.intent.cushioning) { session.intent.cushioning = soft.cushioning; applied.push("cushioning"); }
+          if (soft.distanceKm !== undefined && !session.intent.distanceKm) { session.intent.distanceKm = soft.distanceKm; applied.push("distanceKm"); }
           if (applied.length > 0) {
-            void audit.log({
-              logicalOrderId: orderId,
-              type: "llm.soft_preferences_extracted",
-              actor: "agent",
+            void audit.log({ logicalOrderId: orderId, type: "llm.soft_preferences_extracted", actor: "agent",
               summary: `LLM enrichment applied to soft preferences: ${applied.join(", ")}`,
-              inputDigest: intentDigest(session.intent),
-              decision: "allow",
-              reasonCodes: ["llm_advisory_only"],
-            });
+              inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["llm_advisory_only"] });
           }
         }
       }
 
-      // ── Auditable interpretation record (no chain-of-thought) ──
+      // ── Audit interpretation ──
       void audit.log({
-        logicalOrderId: orderId,
-        type: "interpreter.interpreted",
-        actor: "agent",
+        logicalOrderId: orderId, type: "interpreter.interpreted", actor: "agent",
         summary: `Interpreted action=${merged.action} source=${outcome.source} applied=${countApplied(merged)} rejected=${outcome.rejectedReasons.length}`,
-        inputDigest: intentDigest(session.intent),
-        decision: "allow",
+        inputDigest: intentDigest(session.intent), decision: "allow",
         reasonCodes: outcome.rejectedReasons.length > 0 ? outcome.rejectedReasons.slice(0, 5) : ["schema_validated"],
       });
 
-      // ── Route non-search actions ──
+      // ── Material change invalidation (pre-approval only) ──
+      const materialChange = merged.corrections.length > 0 || merged.removals.length > 0 ||
+        merged.proposedHardConstraints.some((c) => session.intent[c.name as keyof ParsedIntent] !== undefined);
+      if (materialChange && hadQuoteBefore && session.state === "QUOTED") {
+        invalidateQuote(session.dialogue);
+        void audit.log({ logicalOrderId: orderId, type: "quote.invalidated", actor: "system",
+          summary: `Quote invalidated due to material change: corrections=[${merged.corrections.join(",")}] removals=[${merged.removals.join(",")}]`,
+          inputDigest: intentDigest(session.intent), decision: "block", reasonCodes: ["material_change_refinement"] });
+      }
+
+      // ── Acknowledge corrections naturally ──
+      const acknowledgement = acknowledgeChange(merged.corrections, merged.removals, session.intent);
+
+      // ── Route by action ──
       switch (merged.action) {
         case "restart":
+          session.dialogue = createDialogueMemory();
           return { kind: "restart", state: session.state };
+
         case "compare":
-          return {
-            kind: "pending",
-            action: "compare",
-            productIds: merged.requestedProductIds,
-            message: "Comparing shoes is planned for a later stage. I can refine your search in the meantime.",
-            state: session.state,
-          };
+          return handleCompare(session, merged.requestedProductIds, audit, orderId);
+
         case "explain":
-          return {
-            kind: "pending",
-            action: "explain",
-            message: "Explanations are planned for a later stage. I can still refine your search.",
-            state: session.state,
-          };
-        case "select": {
-          const productId = merged.requestedProductIds[0];
-          if (productId) {
-            return { kind: "select", productId, state: session.state };
-          }
-          return { kind: "error", message: "I couldn't identify which shoe you'd like to select.", state: session.state };
-        }
+          return handleExplain(session, merged.requestedProductIds, audit, orderId);
+
+        case "select":
+          return handleSelect(session, merged.requestedProductIds, merged.corrections, audit, orderId);
+
         case "search":
         case "refine":
           break;
       }
 
-      if (session.state === "DRAFT" || session.state === "CLARIFYING" || session.state === "REAPPROVAL_REQUIRED" || session.state === "QUOTED") {
-        const intent: PurchaseIntent = {
-          merchantId: SHOE_CATALOG.merchantId,
-          category: "running_shoes",
-          hardConstraints: {
-            maxAmountMinor: session.intent.maxAmountMinor ?? 0,
-            currency: "INR",
-            size: session.intent.size,
-            colour: session.intent.colour,
-            useCase: session.intent.useCase as PurchaseIntent["hardConstraints"]["useCase"],
-            mustBeReturnable: session.intent.mustBeReturnable,
-            deliverBy: session.intent.deliverBy,
-          },
-          softPreferences: [
-            { name: "distance", value: String(session.intent.distanceKm ?? 0), weight: 1 },
-            { name: "fit", value: session.intent.fit ?? "", weight: 1 },
-            { name: "cushioning", value: session.intent.cushioning ?? "", weight: 1 },
-          ],
-        };
-
-        const ranking = rankProducts(intent, SHOE_CATALOG);
-        session.lastRanking = ranking;
-
-        if (!ranking.ranked) {
-          setState(session, "CLARIFYING");
-          const questions = ranking.missing.map((m) => m.label);
-          const quickReplies = ranking.missing.flatMap((m) => m.options ?? []);
-          const message = composeClarification(session, ranking.missing.map((m) => m.name));
-          void audit.log({
-            logicalOrderId: orderId,
-            type: "intent.clarification_requested",
-            actor: "agent",
-            summary: message,
-            inputDigest: intentDigest(session.intent),
-          });
-          return { kind: "clarify", message, questions, quickReplies, state: session.state };
-        }
-
-        setState(session, "QUOTED");
-        const machineSpend = !session.machineSpend && session.intent.fit
-          ? runFitScoreSpend(session, machineResource, audit, orderId)
-          : undefined;
-        const message = await composeShortlistMessage(session, ranking, machineSpend, llm);
-        void audit.log({
-          logicalOrderId: orderId,
-          type: "intent.shortlist_ranked",
-          actor: "agent",
-          summary: `Ranked ${ranking.matches.length} products for ${intentDigest(session.intent)}`,
-          inputDigest: intentDigest(session.intent),
-        });
-        return {
-          kind: "shortlist",
-          message,
-          matches: ranking.matches,
-          fitScores: session.machineSpend?.fitScores,
-          machineSpend: machineSpend
-            ? {
-                mock: machineSpend.mock,
-                paymentIdentifier: machineSpend.paymentIdentifier,
-                txHash: machineSpend.txHash,
-                network: machineSpend.network,
-                amount: machineSpend.amount,
-              }
-            : undefined,
-          state: session.state,
-        };
+      // ── Search / Refine: rank products or ask clarification ──
+      if (session.state !== "DRAFT" && session.state !== "CLARIFYING" && session.state !== "REAPPROVAL_REQUIRED" && session.state !== "QUOTED") {
+        return { kind: "error", message: `Current state ${session.state} does not accept new product messages.`, state: session.state };
       }
 
+      const intent: PurchaseIntent = {
+        merchantId: SHOE_CATALOG.merchantId,
+        category: "running_shoes",
+        hardConstraints: {
+          maxAmountMinor: session.intent.maxAmountMinor ?? 0,
+          currency: "INR",
+          size: session.intent.size,
+          colour: session.intent.colour,
+          useCase: session.intent.useCase as PurchaseIntent["hardConstraints"]["useCase"],
+          mustBeReturnable: session.intent.mustBeReturnable,
+          deliverBy: session.intent.deliverBy,
+        },
+        softPreferences: [
+          { name: "distance", value: String(session.intent.distanceKm ?? 0), weight: 1 },
+          { name: "fit", value: session.intent.fit ?? "", weight: 1 },
+          { name: "cushioning", value: session.intent.cushioning ?? "", weight: 1 },
+        ],
+      };
+
+      const ranking = rankProducts(intent, SHOE_CATALOG);
+      session.lastRanking = ranking;
+
+      if (!ranking.ranked) {
+        setState(session, "CLARIFYING");
+        const topMissing = nextClarification(session.intent, ranking.missing.map((m) => m.name));
+        const allMissingNames = ranking.missing.map((m) => m.name);
+        const quickReplies = ranking.missing.flatMap((m) => m.options ?? []);
+        const replyMessage = composeClarification(session, allMissingNames);
+        void audit.log({ logicalOrderId: orderId, type: "intent.clarification_requested", actor: "agent",
+          summary: replyMessage, inputDigest: intentDigest(session.intent) });
+        syncMemory(session.dialogue, session.intent, [], allMissingNames, "clarify", message);
+        return { kind: "clarify", message: replyMessage, questions: [topMissing ?? ""].filter(Boolean), quickReplies, state: session.state };
+      }
+
+      setState(session, "QUOTED");
+      const machineSpend = !session.machineSpend && session.intent.fit
+        ? runFitScoreSpend(session, machineResource, audit, orderId) : undefined;
+      const replyMessage = await composeShortlistMessage(session, ranking, machineSpend, llm);
+      void audit.log({ logicalOrderId: orderId, type: "intent.shortlist_ranked", actor: "agent",
+        summary: `Ranked ${ranking.matches.length} products for ${intentDigest(session.intent)}`,
+        inputDigest: intentDigest(session.intent) });
+
+      syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
+
       return {
-        kind: "error",
-        message: `Current state ${session.state} does not accept new product messages.`,
+        kind: "shortlist",
+        message: (acknowledgement ? acknowledgement + " " : "") + replyMessage,
+        matches: ranking.matches,
+        fitScores: session.machineSpend?.fitScores,
+        machineSpend: machineSpend ? { mock: machineSpend.mock, paymentIdentifier: machineSpend.paymentIdentifier, txHash: machineSpend.txHash, network: machineSpend.network, amount: machineSpend.amount } : undefined,
         state: session.state,
       };
     },
@@ -894,10 +867,123 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
 function setState(session: Session, next: OrderState): void {
   const result = transitionState(session.state, next);
-  if (!result.ok) {
-    throw new Error(result.reason);
-  }
+  if (!result.ok) throw new Error(result.reason);
   session.state = next;
+}
+
+/* ── AI-2 grounded action handlers ── */
+
+function handleCompare(
+  session: Session,
+  requestedIds: string[],
+  audit: ReturnType<typeof createAuditLedger>,
+  orderId: string,
+): { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState } | { kind: "error"; message: string; state: OrderState } {
+  if (requestedIds.length < 2) {
+    return { kind: "error", message: "I need two valid product names to compare. Please specify which shoes.", state: session.state };
+  }
+  const ranking = session.lastRanking;
+  if (!ranking || ranking.matches.length === 0) {
+    return { kind: "error", message: "No shortlist available to compare. Let me refine your search first.", state: session.state };
+  }
+  const idA = requestedIds[0]!;
+  const idB = requestedIds[1]!;
+  const matchA = ranking.matches.find((m) => m.product.productId === idA);
+  const matchB = ranking.matches.find((m) => m.product.productId === idB);
+  if (!matchA || !matchB) {
+    return { kind: "error", message: "One or both of those products are not in your current shortlist.", state: session.state };
+  }
+  const strengths: string[] = [];
+  const differences: string[] = [];
+  const compromises: string[] = [];
+  if (matchA.product.priceMinor !== matchB.product.priceMinor) {
+    const cheaper = matchA.product.priceMinor < matchB.product.priceMinor ? matchA.product.name : matchB.product.name;
+    const dearer = matchA.product.priceMinor > matchB.product.priceMinor ? matchA.product.name : matchB.product.name;
+    differences.push(`${cheaper} is cheaper than ${dearer}`);
+  }
+  if (matchA.product.fit !== matchB.product.fit) {
+    differences.push(`${matchA.product.name} is ${matchA.product.fit} fit; ${matchB.product.name} is ${matchB.product.fit} fit`);
+  }
+  if (matchA.product.cushioning !== matchB.product.cushioning) {
+    differences.push(`${matchA.product.name} has ${matchA.product.cushioning} cushioning; ${matchB.product.name} has ${matchB.product.cushioning} cushioning`);
+  }
+  if (matchA.product.typicalDistanceKm !== matchB.product.typicalDistanceKm) {
+    differences.push(`${matchA.product.name} handles up to ${matchA.product.typicalDistanceKm}K; ${matchB.product.name} up to ${matchB.product.typicalDistanceKm}K`);
+  }
+  for (const m of [matchA, matchB]) {
+    if (m.reasons.length > 0) strengths.push(`${m.product.name}: ${m.reasons.join("; ")}`);
+    if (m.compromises.length > 0) compromises.push(`${m.product.name}: ${m.compromises.join("; ")}`);
+  }
+  void audit.log({
+    logicalOrderId: orderId, type: "action.compare", actor: "agent",
+    summary: `Compared ${matchA.product.name} vs ${matchB.product.name}`,
+    inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["grounded_catalog_facts"],
+  });
+  return { kind: "compare", productA: matchA, productB: matchB, facts: { strengths, differences, compromises }, state: session.state };
+}
+
+function handleExplain(
+  session: Session,
+  requestedIds: string[],
+  audit: ReturnType<typeof createAuditLedger>,
+  orderId: string,
+): { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState } | { kind: "error"; message: string; state: OrderState } {
+  const ranking = session.lastRanking;
+  if (!ranking || ranking.matches.length === 0) {
+    return { kind: "error", message: "No shortlist available to explain. Let me refine your search first.", state: session.state };
+  }
+  let target: ProductMatch | undefined;
+  if (requestedIds.length > 0) {
+    target = ranking.matches.find((m) => m.product.productId === requestedIds[0]);
+  } else {
+    target = ranking.matches[0]; // "why this one?" defaults to the top match
+  }
+  if (!target) {
+    return { kind: "error", message: "That product is not in your current shortlist.", state: session.state };
+  }
+  const parts: string[] = [];
+  parts.push(`${target.product.name} is a ${target.product.fit}-fit, ${target.product.cushioning}-cushioned ${target.product.useCase} shoe.`);
+  if (target.reasons.length > 0) parts.push(`Strengths: ${target.reasons.join("; ")}.`);
+  if (target.compromises.length > 0) parts.push(`Trade-offs: ${target.compromises.join("; ")}.`);
+  parts.push(`Priced at ₹${(target.product.priceMinor / 100).toFixed(0)}, rated ${target.product.rating}/5, ships in ${target.product.deliveryLeadDays} day${target.product.deliveryLeadDays === 1 ? "" : "s"}.`);
+  void audit.log({
+    logicalOrderId: orderId, type: "action.explain", actor: "agent",
+    summary: `Explained ${target.product.name}`,
+    inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["grounded_catalog_facts"],
+  });
+  return { kind: "explain", match: target, explanation: parts.join(" "), state: session.state };
+}
+
+function handleSelect(
+  session: Session,
+  requestedIds: string[],
+  corrections: string[],
+  audit: ReturnType<typeof createAuditLedger>,
+  orderId: string,
+): { kind: "select"; productId: string; state: OrderState } | { kind: "error"; message: string; state: OrderState } {
+  const productId = requestedIds[0];
+  if (!productId) {
+    return { kind: "error", message: "I couldn't identify which shoe you'd like to select.", state: session.state };
+  }
+  const product = SHOE_CATALOG.products.find((p) => p.productId === productId);
+  if (!product) {
+    return { kind: "error", message: `Unknown product: ${productId}.`, state: session.state };
+  }
+  const size = corrections.includes("size") ? session.intent.size : session.intent.size;
+  const variant = product.variants.find((v) => v.size === size);
+  if (!variant) {
+    return { kind: "error", message: `${product.name} is not available in ${size ?? "your selected size"}.`, state: session.state };
+  }
+  if (variant.inStock <= 0) {
+    return { kind: "error", message: `${product.name} in ${size} is out of stock.`, state: session.state };
+  }
+  session.dialogue.selectedProductId = productId;
+  void audit.log({
+    logicalOrderId: orderId, type: "action.select", actor: "agent",
+    summary: `Selected ${product.name} ${size}`,
+    inputDigest: intentDigest(session.intent), decision: "allow", reasonCodes: ["eligible_in_stock"],
+  });
+  return { kind: "select", productId, state: session.state };
 }
 
 /* ── AI-1 interpretation merge + apply (deterministic code authoritative) ── */

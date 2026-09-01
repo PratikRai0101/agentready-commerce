@@ -168,8 +168,12 @@ export default function HomePage() {
           setMachineSpend(data.machineSpend ?? null);
         } else if (data.kind === "error") {
           pushAgent(data.message);
-        } else if (data.kind === "pending") {
-          pushAgent(data.message);
+        } else if (data.kind === "compare") {
+          const { productA, productB, facts } = data;
+          const diffText = facts.differences.length > 0 ? facts.differences.join("; ") : "No major differences found.";
+          pushAgent(`Comparing ${productA.product.name} vs ${productB.product.name}: ${diffText}`);
+        } else if (data.kind === "explain") {
+          pushAgent(data.explanation);
         } else if (data.kind === "select") {
           await chooseProduct(data.productId);
         } else if (data.kind === "restart") {

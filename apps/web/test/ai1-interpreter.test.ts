@@ -371,15 +371,15 @@ describe("AI-1 integration — services.respond", () => {
     expect(session.intent.colour).toBeUndefined();
   });
 
-  it("compare action returns pending and never a fake transcript", async () => {
+  it("compare action returns grounded facts and never a fake transcript", async () => {
     const svc = getServices(env, { forceMock: true, llm: stubLlm(async () => ({ ok: false, reason: "empty" as const })) });
     const { session } = await shortlistSession(svc);
     const services = svc;
     const result = await services.respond(session.logicalOrderId, "Compare Streak 4 and Max Cushion.");
-    expect(result.kind).toBe("pending");
-    if (result.kind !== "pending") throw new Error("expected pending");
-    expect(result.action).toBe("compare");
-    expect(result.message).not.toMatch(/streak 4 is better|max cushion is better/i);
+    expect(result.kind).toBe("compare");
+    if (result.kind !== "compare") throw new Error("expected compare");
+    expect(result.productA.product.productId).toBe("p_streak_4");
+    expect(result.productB.product.productId).toBe("p_vista_max");
   });
 
   it("select action returns the validated product id", async () => {
