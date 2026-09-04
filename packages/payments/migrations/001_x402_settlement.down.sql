@@ -21,6 +21,7 @@ DROP TYPE IF EXISTS x402_attempt_status;
 
 DELETE FROM schema_migrations
  WHERE filename IN (
+   '005_x402_lease_takeover_guard.sql',
    '004_x402_integrity_guards.sql',
    '003_x402_release_evidence.sql',
    '002_x402_integrity.sql',
