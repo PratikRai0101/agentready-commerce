@@ -17,11 +17,16 @@
     "@agentready/core": "workspace:*",
     "@agentready/domain": "workspace:*",
     "@agentready/payments": "workspace:*",
+    "@scure/base": "2.4.0",
+    "@solana/kit": "5.5.1",
+    "@x402/extensions": "2.24.0",
+    "@x402/svm": "2.24.0",
     "next": "^15.1.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.4",
     "@types/react-dom": "^19.0.2",

@@ -4,3 +4,6 @@ packages:
 
 allowBuilds:
   esbuild: true
+
+patchedDependencies:
+  '@x402/svm@2.24.0': patches/@x402__svm@2.24.0.patch
