@@ -139,6 +139,20 @@ export default function DemoLabPage() {
     setBusy(false);
   }, [session, refreshTimeline]);
 
+  const startRefund = useCallback(async () => {
+    if (!session) return;
+    setBusy(true);
+    const res = await fetch("/api/compensate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId: session.orderId }),
+    });
+    const data = await res.json();
+    setNotice(data.ok ? `Refund initiated: ${data.refundId ?? "n/a"}` : `Compensation failed: ${data.error}`);
+    void refreshTimeline(session.orderId);
+    setBusy(false);
+  }, [session, refreshTimeline]);
+
   const indicators = session?.indicators ?? { razorpay: "mock", x402: "mock", llm: "disabled" };
 
   return (
@@ -192,6 +206,7 @@ export default function DemoLabPage() {
               <button className="demo-btn" type="button" onClick={duplicateRequest} disabled={busy}>Duplicate request</button>
               <button className="demo-btn" type="button" onClick={replayWebhook} disabled={busy}>Replay webhook</button>
               <button className="demo-btn" type="button" onClick={fulfilFail} disabled={busy}>Fulfilment failure</button>
+              <button className="demo-btn" type="button" onClick={startRefund} disabled={busy}>Start refund</button>
             </div>
           </div>
 
@@ -257,8 +272,8 @@ export default function DemoLabPage() {
             </div>
             <div className="provider-row">
               <span className="prov-name">x402 / Solana</span>
-              <span className="prov-detail">demo settlement &middot; tx_mock_…</span>
-              <span className="prov-mode mock">MOCK</span>
+              <span className="prov-detail">{indicators.x402 === "devnet" ? "Devnet USDC settlement via x402 facilitator" : "Mock settlement — no funds moved"}</span>
+              <span className={`prov-mode ${indicators.x402 === "devnet" ? "devnet" : "mock"}`}>{indicators.x402 === "devnet" ? "DEVNET" : "MOCK"}</span>
             </div>
             <div className="provider-row">
               <span className="prov-name">LLM</span>
