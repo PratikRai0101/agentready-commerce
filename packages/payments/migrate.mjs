@@ -22,10 +22,26 @@ if (files.length === 0) {
   process.exit(0);
 }
 
+function isExplicitCiTestDatabase(url) {
+  try {
+    const parsed = new URL(url);
+    return process.env.CI === "true"
+      && process.env.X402_TEST_PG === "1"
+      && process.env.TEST_PG_URL === url
+      && (parsed.protocol === "postgres:" || parsed.protocol === "postgresql:")
+      && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
+      && (parsed.port === "" || parsed.port === "5432");
+  } catch {
+    return false;
+  }
+}
+
 const pool = new pg.Pool({
   connectionString: databaseUrl,
   max: 1,
-  ssl: { rejectUnauthorized: true },
+  // CI uses a disposable localhost PostgreSQL service without TLS. All other
+  // migration targets require certificate verification.
+  ssl: isExplicitCiTestDatabase(databaseUrl) ? undefined : { rejectUnauthorized: true },
 });
 const client = await pool.connect();
 try {

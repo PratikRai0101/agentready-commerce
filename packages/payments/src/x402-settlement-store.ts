@@ -1123,6 +1123,20 @@ export function pgTransactable(pool: Pool): TransactableExecutor {
   };
 }
 
+function isExplicitCiTestDatabase(databaseUrl: string): boolean {
+  try {
+    const parsed = new URL(databaseUrl);
+    return process.env.CI === "true"
+      && process.env.X402_TEST_PG === "1"
+      && process.env.TEST_PG_URL === databaseUrl
+      && (parsed.protocol === "postgres:" || parsed.protocol === "postgresql:")
+      && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
+      && (parsed.port === "" || parsed.port === "5432");
+  } catch {
+    return false;
+  }
+}
+
 export function createSettlementPool(databaseUrl: string, opts?: { poolMax?: number; statementTimeoutMs?: number }): Pool {
   return new Pool({
     connectionString: databaseUrl,
@@ -1130,8 +1144,8 @@ export function createSettlementPool(databaseUrl: string, opts?: { poolMax?: num
     connectionTimeoutMillis: 10_000,
     statement_timeout: opts?.statementTimeoutMs ?? 15_000,
     idle_in_transaction_session_timeout: 15_000,
-    // x402 app storage is never allowed over plaintext. Supabase's CA is
-    // supplied through NODE_EXTRA_CA_CERTS in deployment environments.
-    ssl: { rejectUnauthorized: true },
+    // x402 app storage is never allowed over plaintext. The only exception is
+    // the explicitly opted-in disposable localhost CI service.
+    ssl: isExplicitCiTestDatabase(databaseUrl) ? undefined : { rejectUnauthorized: true },
   });
 }
