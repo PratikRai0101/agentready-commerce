@@ -27,7 +27,7 @@ tests. Commit history in this repo follows the same phases.
 | 2 — envelope + policy | Done | `packages/domain`, `approve`/`tamper` routes |
 | 3 — Razorpay end to end | **Done — real Test Mode checkout, authenticated webhook, processed refund** (see [Razorpay Test Mode proof](#razorpay-test-mode-proof)) | `packages/payments`, `pay/*`, `webhook/*` routes |
 | 4 — failure theatre | Done | UI panel + `tamper`/`fulfil`/`compensate`/`webhook/simulate` routes |
-| 5 — x402/Solana | **Partial — mock + Devnet protocol wired and exercised offline; one chain settlement via separate harness, no live app-path transaction** | `packages/payments/src/x402.ts`, `packages/payments/src/devnet-machine.ts`, `apps/web/lib/machine.ts`, `machine.paid_resource` audit event, `apps/web/test/x402-devnet.test.ts` (verify-failure/pending invariants pinned offline; live test env-gated and skipped) |
+| 5 — x402/Solana | **Partial — mock + Devnet protocol wired; one separate harness settlement and one application-path settlement are evidenced; replay remains offline-only** | `packages/payments/src/x402.ts`, `packages/payments/src/devnet-machine.ts`, `apps/web/lib/machine.ts`, `machine.paid_resource` audit event, `apps/web/test/x402-devnet.test.ts` (verify-failure/pending invariants pinned offline; live test env-gated and skipped), [`docs/devnet-settlement-evidence-app-path-2026-09-04.md`](devnet-settlement-evidence-app-path-2026-09-04.md) |
 | 6 — conformance | 15 critical gates | `packages/conformance/src/checks.ts`, `apps/web/app/api/conformance/route.ts` |
 | 7 — polish | Partially (no video/credentials) | reset + scenario endpoints, indicators, this document |
 

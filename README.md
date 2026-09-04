@@ -23,7 +23,11 @@ The agent can purchase a premium fit-scoring resource through x402/Solana. Two m
 - **Mock** (`X402_MODE=mock`): Simulated settlements, no funds moved. Clearly labelled everywhere as "x402 MOCK — no funds moved."
 - **Devnet** (`X402_MODE=devnet`): Real Solana Devnet USDC transactions via the official x402 facilitator. Clearly labelled everywhere as "x402 SOLANA DEVNET — test tokens, no real money."
 
-**No real Devnet transaction has been executed yet.** The Devnet path is fully wired but requires a funded burner keypair to actually submit a transaction. Run with `X402_LIVE_DEVNET_TEST=1` and valid credentials to exercise the real facilitator. See "Devnet setup" below.
+One real Devnet settlement was executed through the application path and is
+documented in [`docs/devnet-settlement-evidence-app-path-2026-09-04.md`](docs/devnet-settlement-evidence-app-path-2026-09-04.md).
+It used test tokens only; no replacement transaction was submitted. The live
+test remains gated behind `X402_LIVE_DEVNET_TEST=1` and valid credentials. See
+"Devnet setup" below.
 
 ## Run it
 

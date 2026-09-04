@@ -18,7 +18,7 @@ submission; do not carry forward stale claims.
 - [ ] `docs/evidence/razorpay-test-proof.md` (committed, sanitized): 3 Test Mode checkouts, 2 authenticated webhooks, 1 processed refund
 - [ ] `data/proof/razorpay-test-proof.md` (local only, ignored): detailed record — confirm present, never commit
 - [ ] `docs/evidence/llm-verification-3msg.md`: 3/3 accepted turns; exact tokens unavailable, $0.0022 is a theoretical ceiling
-- [ ] `docs/devnet-settlement-evidence.md`: one harness settlement; app-path Devnet never live; replay offline-only
+- [ ] `docs/devnet-settlement-evidence.md` and `docs/devnet-settlement-evidence-app-path-2026-09-04.md`: one harness settlement plus one application-path settlement; replay remains offline-only
 - [ ] `docs/evidence/mock-lifecycle-recovery.md`: PRESENT / MISSING (mock fulfil-fail → compensate covered by `mock-buyer-client.test.ts`; write the capture only from a real run)
 
 ## Still pending (blockers until done)
