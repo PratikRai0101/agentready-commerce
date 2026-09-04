@@ -2738,7 +2738,7 @@ describe("chain finalized but persistence fails → operator reconcile without r
 
   it("returns the signature for operator recovery, then replays cached with one settle total", async () => {
     // Let the simulated worker lease expire before the operator takeover.
-    process.env.X402_LEASE_TTL_MS = "1";
+    process.env.X402_LEASE_TTL_MS = "1000";
     const resource = createResource();
     const { settleFn: settlePayment } = stubAdapters(resource);
     const store = (resource as unknown as { store: InMemorySettlementStore }).store;
@@ -2775,7 +2775,7 @@ describe("chain finalized but persistence fails → operator reconcile without r
 
     // Operator incident path: persist the finalized signature, no resubmission.
     transitionSpy.mockRestore();
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 1100));
     const { persistReconciledSettlement } = await import("@agentready/payments/operator");
     const reconciled = await persistReconciledSettlement(store, {
       operationId: row!.operationId,
