@@ -82,6 +82,8 @@ export type ResolveInput = {
   /** Current server-side approval id, or undefined pre-approval. */
   approvalEventId?: string;
   callerPaymentId: string;
+  /** Server-derived canonical payment terms, persisted for reconciliation. */
+  requirementsJson?: unknown;
 };
 
 export type ResolveResult =
@@ -246,6 +248,13 @@ export type SettlementStore = {
   getByOperationId(operationId: string): Promise<StoredAttempt | null>;
   findByDigestPayment(requestDigest: string, callerPaymentId: string): Promise<StoredAttempt | null>;
   findByPaymentId(callerPaymentId: string): Promise<StoredAttempt[]>;
+  /** Settled replay for the exact logical request; null when no result exists. */
+  findSettledAttempt(
+    logicalOrderId: string,
+    intentVersion: number,
+    requestDigest: string,
+    resource: string,
+  ): Promise<StoredAttempt | null>;
   /** Newest-or-oldest active row for (order, intent); null when none unresolved. */
   findActiveAttempt(logicalOrderId: string, intentVersion: number): Promise<StoredAttempt | null>;
   /** Liveness probe (SELECT 1). Used at boot and by restart sweeps. */
@@ -319,6 +328,23 @@ export class PostgresSettlementStore implements SettlementStore {
       [callerPaymentId],
     );
     return result.rows.map(rowFromDb);
+  }
+
+  async findSettledAttempt(
+    logicalOrderId: string,
+    intentVersion: number,
+    requestDigest: string,
+    resource: string,
+  ): Promise<StoredAttempt | null> {
+    const result = await this.exec.query(
+      `SELECT * FROM x402_settlement_attempts
+       WHERE logical_order_id = $1 AND intent_version = $2
+         AND request_digest = $3 AND resource = $4 AND status = 'settled'
+       ORDER BY updated_at DESC LIMIT 1`,
+      [logicalOrderId, intentVersion, requestDigest, resource],
+    );
+    const row = result.rows[0];
+    return row ? rowFromDb(row) : null;
   }
 
   async findActiveAttempt(logicalOrderId: string, intentVersion: number): Promise<StoredAttempt | null> {
@@ -412,6 +438,19 @@ export class PostgresSettlementStore implements SettlementStore {
       return { kind: "existing", row: active };
     }
 
+    const settled = await this.findSettledAttempt(
+      input.logicalOrderId,
+      input.intentVersion,
+      input.requestDigest,
+      input.resource,
+    );
+    if (settled) {
+      if (approvalMismatch(settled.authRevision, input.approvalEventId)) {
+        return { kind: "approval_mismatch", row: settled, detail: APPROVAL_MISMATCH_DETAIL };
+      }
+      return { kind: "existing", row: settled };
+    }
+
     const released = await this.findLatestReleased(input.logicalOrderId, input.intentVersion);
     let authRevision: string;
     if (released) {
@@ -438,9 +477,18 @@ export class PostgresSettlementStore implements SettlementStore {
       const result = await this.exec.transaction(async (tx) => {
         const inserted = await tx.query(
           `INSERT INTO x402_settlement_attempts
-             (operation_id, logical_order_id, intent_version, request_digest, resource, auth_revision, caller_payment_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [operationId, input.logicalOrderId, input.intentVersion, input.requestDigest, input.resource, authRevision, input.callerPaymentId],
+             (operation_id, logical_order_id, intent_version, request_digest, resource, auth_revision, caller_payment_id, requirements_json)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *`,
+          [
+            operationId,
+            input.logicalOrderId,
+            input.intentVersion,
+            input.requestDigest,
+            input.resource,
+            authRevision,
+            input.callerPaymentId,
+            JSON.stringify(input.requirementsJson ?? {}),
+          ],
         );
         const row = rowFromDb(inserted.rows[0] as Record<string, unknown>);
         await this.appendHistoryOn(
@@ -457,9 +505,9 @@ export class PostgresSettlementStore implements SettlementStore {
       const candidates = [
         await this.getByOperationId(operationId),
         await this.findByDigestPayment(input.requestDigest, input.callerPaymentId),
-        ...await this.findByPaymentId(input.callerPaymentId).then((rows) =>
-          rows.filter((r) => !["settled", "rejected", "mismatch", "released"].includes(r.status))),
+        ...await this.findByPaymentId(input.callerPaymentId),
         await this.findActiveAttempt(input.logicalOrderId, input.intentVersion),
+        await this.findSettledAttempt(input.logicalOrderId, input.intentVersion, input.requestDigest, input.resource),
       ];
       const winner = candidates.find((r) => r !== null) ?? null;
       if (!winner) throw new UniqueViolationError("Unique conflict without a readable winner; retry the accept.");
@@ -704,6 +752,20 @@ export class InMemorySettlementStore implements SettlementStore {
       .map((r) => this.clone(r));
   }
 
+  async findSettledAttempt(
+    logicalOrderId: string,
+    intentVersion: number,
+    requestDigest: string,
+    resource: string,
+  ): Promise<StoredAttempt | null> {
+    const row = [...this.attempts.values()]
+      .filter((r) => r.logicalOrderId === logicalOrderId)
+      .filter((r) => r.intentVersion === intentVersion)
+      .filter((r) => r.requestDigest === requestDigest && r.resource === resource)
+      .find((r) => r.status === "settled");
+    return row ? this.clone(row) : null;
+  }
+
   async findActiveAttempt(logicalOrderId: string, intentVersion: number): Promise<StoredAttempt | null> {
     const row = [...this.attempts.values()]
       .filter((r) => r.logicalOrderId === logicalOrderId && r.intentVersion === intentVersion)
@@ -746,11 +808,10 @@ export class InMemorySettlementStore implements SettlementStore {
         return { kind: "existing", row: this.clone(row) };
       }
     }
-    // Same payment id live elsewhere: surface it for a deterministic 409.
-    // Synchronous scan+insert below keeps this atomic in-process.
+    // A payment identifier is globally single-use, including after a terminal
+    // result. The caller turns a different request digest into a 409.
     const pidRow = [...this.attempts.values()]
       .filter((r) => r.callerPaymentId === input.callerPaymentId)
-      .filter((r) => !["settled", "rejected", "mismatch", "released"].includes(r.status))
       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))[0];
     if (pidRow) {
       if (approvalMismatch(pidRow.authRevision, input.approvalEventId)) {
@@ -768,6 +829,21 @@ export class InMemorySettlementStore implements SettlementStore {
         return { kind: "approval_mismatch", row: this.clone(activeList), detail: APPROVAL_MISMATCH_DETAIL };
       }
       return { kind: "existing", row: this.clone(activeList) };
+    }
+
+    // Keep the in-memory scan synchronous: resolveOrCreate is intentionally
+    // atomic within one event loop turn for the test double.
+    const settledRow = [...this.attempts.values()]
+      .filter((r) => r.logicalOrderId === input.logicalOrderId)
+      .filter((r) => r.intentVersion === input.intentVersion)
+      .filter((r) => r.requestDigest === input.requestDigest && r.resource === input.resource)
+      .find((r) => r.status === "settled");
+    const settled = settledRow ? this.clone(settledRow) : null;
+    if (settled) {
+      if (approvalMismatch(settled.authRevision, input.approvalEventId)) {
+        return { kind: "approval_mismatch", row: settled, detail: APPROVAL_MISMATCH_DETAIL };
+      }
+      return { kind: "existing", row: settled };
     }
 
     const released = [...this.attempts.values()]
@@ -808,7 +884,7 @@ export class InMemorySettlementStore implements SettlementStore {
       signedPayloadEnc: null,
       payloadDigest: null,
       payer: null,
-      requirementsJson: {},
+      requirementsJson: input.requirementsJson ?? {},
       status: "pending",
       txHash: null,
       evidenceJson: null,

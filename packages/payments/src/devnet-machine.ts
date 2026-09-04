@@ -271,6 +271,7 @@ export class DevnetMachineResource {
     approvalEventId?: string;
   }): Promise<{ operationId: string; requestDigest: string }> {
     const digest = this.buildRequestDigest(input.spendingRequest);
+    const requirements = this.getCanonicalRequirements(digest);
     const payloadDigest = digestOfEncodedPayment(input.encodedPayment);
     const resolution = await this.store.resolveOrCreate({
       logicalOrderId: input.spendingRequest.orderId,
@@ -279,6 +280,7 @@ export class DevnetMachineResource {
       resource: RESOURCE_URL,
       approvalEventId: input.approvalEventId,
       callerPaymentId: input.paymentIdentifier,
+      requirementsJson: requirements,
     });
     if (resolution.kind === "release_required") {
       throw new Error(`Release required: ${resolution.detail}`);
@@ -584,6 +586,7 @@ export class DevnetMachineResource {
       resource: RESOURCE_URL,
       approvalEventId: opts?.approvalEventId,
       callerPaymentId: paymentId,
+      requirementsJson: canonical,
     });
     if (resolution.kind === "release_required") {
       return { status: 409, body: { error: "release_required", detail: resolution.detail }, headers: {} };

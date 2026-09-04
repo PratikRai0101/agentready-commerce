@@ -137,6 +137,44 @@ describe("replacement-ID blocking (manual stays blocking)", () => {
     const none = await store.resolveOrCreate({ ...BASE_INPUT, callerPaymentId: "pay_x402_store_03" });
     expect(none.kind).toBe("release_required");
   });
+
+  it("returns the settled result instead of opening a second resource spend", async () => {
+    const store = new InMemorySettlementStore();
+    const first = await store.resolveOrCreate({ ...BASE_INPUT, requirementsJson: { amount: "10000" } });
+    if (first.kind !== "created") throw new Error("expected created");
+    await store.transition(
+      first.row.operationId,
+      ["pending"],
+      "settled",
+      { txHash: "tx_once", evidenceJson: { verified: true } },
+      null,
+      null,
+      "test",
+      "settled",
+    );
+
+    const replay = await store.resolveOrCreate({
+      ...BASE_INPUT,
+      callerPaymentId: "pay_x402_store_new_id",
+      requirementsJson: { amount: "10000" },
+    });
+    expect(replay.kind).toBe("existing");
+    expect(replay.row.operationId).toBe(first.row.operationId);
+  });
+
+  it("does not reuse a terminal payment identifier for another request", async () => {
+    const store = new InMemorySettlementStore();
+    const first = await store.resolveOrCreate({ ...BASE_INPUT });
+    if (first.kind !== "created") throw new Error("expected created");
+    await store.transition(first.row.operationId, ["pending"], "rejected", {}, null, null, "test", "rejected");
+
+    const reused = await store.resolveOrCreate({
+      ...BASE_INPUT,
+      requestDigest: "d".repeat(64),
+    });
+    expect(reused.kind).toBe("existing");
+    expect(reused.row.operationId).toBe(first.row.operationId);
+  });
 });
 
 describe("lease fencing and stale workers", () => {
