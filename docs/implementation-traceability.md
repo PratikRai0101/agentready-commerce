@@ -27,9 +27,18 @@ tests. Commit history in this repo follows the same phases.
 | 2 — envelope + policy | Done | `packages/domain`, `approve`/`tamper` routes |
 | 3 — Razorpay end to end | **Done — real Test Mode checkout, authenticated webhook, processed refund** (see [Razorpay Test Mode proof](#razorpay-test-mode-proof)) | `packages/payments`, `pay/*`, `webhook/*` routes |
 | 4 — failure theatre | Done | UI panel + `tamper`/`fulfil`/`compensate`/`webhook/simulate` routes |
-| 5 — x402/Solana | Protocol done; settlement mock | `packages/payments/src/x402.ts`, `apps/web/lib/machine.ts`, `machine.paid_resource` audit event |
+| 5 — x402/Solana | **Partial — mock + Devnet protocol wired and exercised offline; one chain settlement via separate harness, no live app-path transaction** | `packages/payments/src/x402.ts`, `packages/payments/src/devnet-machine.ts`, `apps/web/lib/machine.ts`, `machine.paid_resource` audit event, `apps/web/test/x402-devnet.test.ts` (verify-failure/pending invariants pinned offline; live test env-gated and skipped) |
 | 6 — conformance | 15 critical gates | `packages/conformance/src/checks.ts`, `apps/web/app/api/conformance/route.ts` |
 | 7 — polish | Partially (no video/credentials) | reset + scenario endpoints, indicators, this document |
+
+## Machine-discovery addition (frozen storefront scope)
+
+| Deliverable | Status | Where |
+|---|---|---|
+| Read-only catalog projection | Done (mock) | `apps/web/lib/catalog-public.ts`, `GET /api/catalog` (live-verified 200) |
+| Discovery descriptor, no protocol claims | Done (mock) | `apps/web/lib/discovery.ts`, `GET /.well-known/agentready` (live-verified 200; `protocolConformance: None claimed`) |
+| Mock buyer-client demo, explicit human approval | Done | `apps/web/test/mock-buyer-client.test.ts` (discovery + gated purchase + failure→refund) |
+| Demo Lab refund control | Done (mock) | `apps/web/app/demo/page.tsx` “Start refund” → `POST /api/compensate` |
 
 ## Product-spec functional requirements
 
@@ -100,7 +109,7 @@ the detailed local record. Test date: 2026-08-31/2026-09-01 (local proof files).
 | Reproducible local setup | Done (`pnpm install && pnpm dev`) |
 | `.env.example` with no secrets | Done (`apps/web/.env.example`; local values only in gitignored `.env.local`) |
 | Architecture diagram | `docs/architecture.md` + README |
-| Meaningful tests and final results | 106 tests, 15/15 conformance gates |
+| Meaningful tests and final results | 411 passed / 1 skipped across 20 files (measured 2026-09-04), 15/15 conformance gates |
 | Razorpay test-mode proof | **Done** — real Test Mode checkout ×3, authenticated `payment.captured` webhook ×2, processed refund ×1 (`docs/implementation-traceability.md` § Razorpay Test Mode proof, `docs/evidence/razorpay-test-proof.md`) |
 | Five-minute pitch video | **Pending** |
 | Disclosure of mocks/synthetic data | Done (badges, audit `mock` flags, README) |

@@ -21,17 +21,17 @@ Resolve these before implementation decisions harden.
 
 ## x402/Solana
 
-1. Which paid machine resource materially improves the recommendation?
-2. Will it be a real third-party resource or a clearly labelled project-owned demo service?
-3. Which supported Devnet asset and facilitator will be used?
-4. Which wallet approval experience is reliable for the pitch?
-5. Will the Offer/Receipt and Payment Identifier extensions be used?
-6. Is the Commerce Envelope digest supported in the chosen SVM memo flow?
+1. ~~Which paid machine resource materially improves the recommendation?~~ **Resolved:** RunVista Premium Fit-Scoring API (project-owned demo service).
+2. ~~Will it be a real third-party resource or a clearly labelled project-owned demo service?~~ **Resolved:** Project-owned demo service at `/api/resources/premium-fit-score`.
+3. Which supported Devnet asset and facilitator will be used? **Resolved for testing:** USDC Devnet (`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`) via `https://x402.org/facilitator`.
+4. ~~Which wallet approval experience is reliable for the pitch?~~ **Partially resolved:** one Solana Devnet settlement completed via a separate harness (see `docs/devnet-settlement-evidence.md`); the application Devnet path has never run live. No live transaction without explicit approval.
+5. Will the Offer/Receipt and Payment Identifier extensions be used? **Pending** — not blocking the demo.
+6. Is the Commerce Envelope digest supported in the chosen SVM memo flow? **Resolved in code, verified offline only:** The memo is `agentcart:v1:{requestDigest}` where `requestDigest` is the SHA-256 of the canonical `ToolSpendRequest`. The recorded live settlement carries the memo on-chain; app-path memo verification is covered by offline tests, not a live app run.
 
 ## Product choices
 
 1. Is x402 shown inline in the main purchase journey or as a short interoperability scene?
-2. Is the primary customer assistant embedded in the merchant site or exposed to external buyer agents as well?
+2. Is the primary customer assistant embedded in the merchant site or exposed to external buyer agents as well? **Resolved as:** first-party chat UI plus a machine-readable catalog (`GET /api/catalog`) and capability descriptor (`GET /.well-known/agentready`, explicitly non-conformant) driving the same gated HTTP APIs; demonstrated by `apps/web/test/mock-buyer-client.test.ts`. No external-agent SLA and no protocol-conformance claim.
 3. Which two negative paths will be mandatory in the five-minute pitch?
 4. What evidence will justify ranking quality?
 
