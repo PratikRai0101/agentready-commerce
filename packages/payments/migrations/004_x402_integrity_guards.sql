@@ -136,7 +136,7 @@ DECLARE
 BEGIN
   -- Store methods append richer trigger/note data atomically. Direct role SQL
   -- has no marker and is recorded here rather than silently skipping history.
-  IF current_setting('x402_store_history_recorded', true) = 'true' THEN
+  IF current_setting('x402.store_history_recorded', true) = 'true' THEN
     RETURN NEW;
   END IF;
   IF TG_OP = 'INSERT' THEN
