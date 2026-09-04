@@ -18,6 +18,7 @@ import {
 } from "@x402/extensions/payment-identifier";
 import {
   SOLANA_DEVNET_CAIP2,
+  buildDevnetToolSpendRequest,
   buildPaymentRequired,
   encodeHeader,
   formatX402Amount,
@@ -2102,6 +2103,110 @@ describe("application-driven Devnet payment", () => {
     expect(fetchSpy).toHaveBeenCalled();
   });
 
+  it("audits an ambiguous route response when settled persistence fails", async () => {
+    const { getDevnetMachineResource } = await import("../lib/machine");
+    const resource = getDevnetMachineResource();
+    const config = loadX402Config() as X402DevnetConfig;
+    const settleFn = vi.fn().mockResolvedValue({
+      success: true,
+      transaction: "tx_route_persist_fail",
+      network: SOLANA_DEVNET_CAIP2,
+      payer: resource.payerPublicKey(),
+      amount: "10000",
+    });
+    (resource as unknown as { resourceServer: Record<string, unknown> }).resourceServer = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      verifyPayment: vi.fn().mockResolvedValue({ isValid: true, payer: resource.payerPublicKey() }),
+      settlePayment: settleFn,
+    };
+    (resource as unknown as { initialized: boolean }).initialized = true;
+
+    const servicesGlobal = globalThis as typeof globalThis & {
+      __agentreadyServices?: ReturnType<typeof getServices>;
+    };
+    const previousServices = servicesGlobal.__agentreadyServices;
+    servicesGlobal.__agentreadyServices = undefined;
+
+    try {
+      const services = getServices(process.env, { forceMock: true });
+      const session = services.createSession();
+      const spendingRequest = buildDevnetToolSpendRequest(config, session.logicalOrderId, 1);
+      const digest = resource.buildRequestDigest(spendingRequest);
+      const canonical = resource.getCanonicalRequirements(digest);
+      const paymentId = "pay_route_audit_01";
+      const encoded = encodeDevnetPayment(canonical, paymentId, resource.payerPublicKey());
+      const rpcSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url !== RPC_URL) throw new Error(`Unexpected offline audit-test request: ${url}`);
+        return {
+          json: async () => ({
+            result: {
+              transaction: {
+                message: {
+                  instructions: [
+                    { parsed: canonical.extra.memo, program: "spl-memo", programId: MEMO_PROGRAM_ID },
+                    {
+                      parsed: {
+                        type: "transferChecked",
+                        info: {
+                          mint: config.devnetUsdcMint,
+                          destination: config.payeePublicKey,
+                          authority: resource.payerPublicKey(),
+                          tokenAmount: { amount: "10000" },
+                        },
+                      },
+                      program: "spl-token",
+                      programId: TOKEN_PROGRAM_ID,
+                    },
+                  ],
+                },
+              },
+              meta: { err: null, innerInstructions: [], postTokenBalances: [], preTokenBalances: [] },
+            },
+          }),
+        } as Response;
+      });
+      const store = (resource as unknown as { store: InMemorySettlementStore }).store;
+      const originalTransition = store.transition.bind(store);
+      const transitionSpy = vi.spyOn(store, "transition").mockImplementation(async (...args) => {
+        if (args[2] === "settled") throw new Error("persistence down (stub)");
+        return originalTransition(...args);
+      });
+
+      const response = await premiumFitScorePost(new NextRequest(`${APP_ORIGIN}/api/resources/premium-fit-score`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "PAYMENT-SIGNATURE": encoded,
+        },
+        body: JSON.stringify({ requestDigest: digest, spendingRequest }),
+      }));
+      const body = await response.json() as Record<string, unknown>;
+
+      expect(response.status).toBe(202);
+      expect(body.error).toBe("settlement_ambiguous");
+      expect(body.transactionHash).toBe("tx_route_persist_fail");
+      expect(settleFn).toHaveBeenCalledTimes(1);
+
+      const pendingEvent = (await services.timeline(session.logicalOrderId))
+        .find((event) => event.type === "machine.spend_pending");
+      expect(pendingEvent).toBeDefined();
+      expect(pendingEvent?.decision).toBe("review");
+      expect(pendingEvent?.externalReferences).toMatchObject({
+        paymentIdentifier: paymentId,
+        requestDigest: digest,
+        txHash: "tx_route_persist_fail",
+        responseStatus: "202",
+      });
+      expect(JSON.stringify(pendingEvent)).not.toContain(encoded);
+
+      transitionSpy.mockRestore();
+      rpcSpy.mockRestore();
+    } finally {
+      servicesGlobal.__agentreadyServices = previousServices;
+    }
+  });
+
   it("persists and reconciles an ambiguous tool spend through getServices without resubmitting", async () => {
     const payer = await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(32).fill(1));
     const feePayer = await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(32).fill(2));
@@ -2554,5 +2659,146 @@ describe("verification failure never settles (offline stubs)", () => {
     expect(JSON.stringify(second.body)).toContain("settlement_ambiguous");
     expect(settlePayment).toHaveBeenCalledTimes(1);
     expect(await resource.hasProcessed("pay_test_ambiguous_01", digest)).toBe(false);
+  });
+});
+
+describe("chain finalized but persistence fails → operator reconcile without resubmission (offline stubs)", () => {
+  // Production incident: the settled transition rolled back (multi-status
+  // history enum write) after the facilitator submission finalized on-chain.
+  // The route returned 500 with no signature persisted. The fix returns 202
+  // with the transaction hash, and the operator reconcile path persists it
+  // with zero additional submissions. No facilitator, RPC, or Devnet calls:
+  // every external boundary is stubbed.
+  const USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+  const PAYER_KEY = "IntegrationPayerKey111111111111111111111111";
+  const PAYEE_KEY = "IntegrationPayeeKey111111111111111111111111";
+  const FEE_PAYER_KEY = "IntegrationFeePayerKey111111111111111111111";
+  const STUB_TX = "5".repeat(64);
+  const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+
+  function createResource() {
+    return new DevnetMachineResource({
+      mode: "devnet",
+      facilitatorUrl: "https://x402.org/facilitator",
+      payerSecretKey: new Uint8Array(32),
+      payerPublicKey: PAYER_KEY,
+      payeePublicKey: PAYEE_KEY,
+      devnetUsdcMint: USDC_MINT,
+      amountMinor: 10000,
+      solanaRpcUrl: "http://localhost:9999/rpc",
+    },
+      new InMemorySettlementStore(),
+    );
+  }
+
+  function stubAdapters(resource: DevnetMachineResource) {
+    const verifyFn = vi.fn().mockResolvedValue({ isValid: true, payer: PAYER_KEY });
+    const settleFn = vi.fn().mockResolvedValue({
+      success: true, transaction: STUB_TX, network: SOLANA_DEVNET_CAIP2, payer: PAYER_KEY, amount: "10000",
+    });
+    (resource as unknown as { resourceServer: Record<string, unknown> }).resourceServer = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      verifyPayment: verifyFn,
+      settlePayment: settleFn,
+    };
+    (resource as unknown as { initialized: boolean }).initialized = true;
+    return { verifyFn, settleFn };
+  }
+
+  function stubVerifiedRpc(expectedMemo: string) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation((async (url: string | URL | Request) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+      if (urlStr === "http://localhost:9999/rpc") {
+        return {
+          json: async () => ({
+            result: {
+              transaction: {
+                message: {
+                  instructions: [
+                    { parsed: expectedMemo, program: "spl-memo", programId: MEMO_PROGRAM_ID },
+                    {
+                      parsed: {
+                        type: "transferChecked",
+                        info: { mint: USDC_MINT, destination: PAYEE_KEY, authority: PAYER_KEY, tokenAmount: { amount: "10000" } },
+                      },
+                      program: "spl-token",
+                      programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    },
+                  ],
+                },
+              },
+              meta: { err: null, innerInstructions: [], postTokenBalances: [], preTokenBalances: [] },
+            },
+          }),
+        } as Response;
+      }
+      throw new Error(`Offline test attempted unexpected outbound request: ${urlStr}`);
+    }) as typeof fetch);
+  }
+
+  it("returns the signature for operator recovery, then replays cached with one settle total", async () => {
+    // Let the simulated worker lease expire before the operator takeover.
+    process.env.X402_LEASE_TTL_MS = "1";
+    const resource = createResource();
+    const { settleFn: settlePayment } = stubAdapters(resource);
+    const store = (resource as unknown as { store: InMemorySettlementStore }).store;
+    const spendingRequest: ToolSpendRequest = {
+      orderId: "ord_persist_fail_1", intentVersion: 1, resource: "/api/resources/premium-fit-score",
+      amountMinor: 10000, network: SOLANA_DEVNET_CAIP2, asset: USDC_MINT, payee: PAYEE_KEY, purpose: "fit_scoring",
+    };
+    const digest = resource.buildRequestDigest(spendingRequest);
+    const canonical = resource.getCanonicalRequirements(digest);
+    const encoded = encodeDevnetPayment(canonical, "pay_test_persist_fail_01");
+    const rpcSpy = stubVerifiedRpc(canonical.extra.memo);
+
+    // Persistence outage confined to the settled write (chain already final).
+    const origTransition = store.transition.bind(store);
+    const transitionSpy = vi.spyOn(store, "transition").mockImplementation(async (
+      operationId: string, from: Array<"pending" | "rejected" | "settling" | "awaiting_evidence" | "settled" | "mismatch" | "manual" | "released">,
+      to: "pending" | "rejected" | "settling" | "awaiting_evidence" | "settled" | "mismatch" | "manual" | "released",
+      update: Partial<{ txHash: string | null }>, owner: string | null, fenceToken: string | null, trigger: string, note: string,
+    ) => {
+      if (to === "settled") throw new Error("persistence down (stub)");
+      return origTransition(operationId, from as never, to as never, update as never, owner, fenceToken, trigger, note) as never;
+    });
+
+    const first = await resource.accept(encoded, digest, spendingRequest);
+    // Never a 500 that loses the signature: 202 carries it for the operator.
+    expect(first.status).toBe(202);
+    const firstBody = first.body as Record<string, unknown>;
+    expect(firstBody.transactionHash).toBe(STUB_TX);
+    expect(firstBody.retryable).toBe(true);
+    expect(settlePayment).toHaveBeenCalledTimes(1);
+    const row = await store.findByDigestPayment(digest, "pay_test_persist_fail_01");
+    expect(row?.status).toBe("settling");
+    expect(row?.txHash).toBeNull();
+
+    // Operator incident path: persist the finalized signature, no resubmission.
+    transitionSpy.mockRestore();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const { persistReconciledSettlement } = await import("@agentready/payments/operator");
+    const reconciled = await persistReconciledSettlement(store, {
+      operationId: row!.operationId,
+      operatorId: "op_test",
+      txHash: STUB_TX,
+      checkedSlot: 1,
+      note: "incident reconcile (stub)",
+      evidenceJson: { paymentIdentifier: "pay_test_persist_fail_01", transactionHash: STUB_TX },
+    });
+    expect(reconciled.ok).toBe(true);
+    if (!reconciled.ok) throw new Error(reconciled.reasons.join("; "));
+    expect(reconciled.row.status).toBe("settled");
+    expect(store.historyForTests().at(-1)).toMatchObject({
+      from: "settling",
+      to: "settled",
+      trigger: "operator-reconcile",
+    });
+
+    const retry = await resource.accept(encoded, digest, spendingRequest);
+    expect(retry.status).toBe(200);
+    expect(settlePayment).toHaveBeenCalledTimes(1);
+    expect(((retry.body as Record<string, unknown>).settlementEvidence as Record<string, unknown>).transactionHash).toBe(STUB_TX);
+
+    rpcSpy.mockRestore();
   });
 });

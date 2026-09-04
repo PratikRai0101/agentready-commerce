@@ -1,10 +1,26 @@
 // Thin execution wrapper around src/operator.ts (pure logic, unit-tested).
 // Connects with deployment IAM / operator DB credentials from the environment.
 // Requires: DATABASE_URL, X402_STORE_ENC_KEY. Never run against production
-// without an approved change record. No settlement is submitted by any path here.
+// without an approved change record. No settlement is submitted by any path here:
+// - release: manual→released transition only.
+// - reconcile-settled: persists an already-finalized signature (read-only RPC
+//   inspection) with a settling/awaiting_evidence→settled transition only.
 import pg from "pg";
-import { parseReleaseArgs, resolveReleaseBlockhash, OPERATOR_USAGE } from "./src/operator.ts";
+import { parseReleaseArgs, parseReconcileSettledArgs, persistReconciledSettlement, resolveReleaseBlockhash, validateReconcileSettledEvidence, OPERATOR_USAGE } from "./src/operator.ts";
 import { PostgresSettlementStore, pgTransactable, parseEncryptionKey } from "./src/x402-settlement-store.ts";
+
+// Canonical devnet constants (mirrors packages/payments/src/x402-config.ts and
+// src/devnet-machine.ts, which cannot be imported here: that module graph uses
+// TypeScript parameter properties that plain-node type stripping rejects, and
+// this CLI must stay runnable without a build step).
+const SOLANA_DEVNET_CAIP2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+const USDC_DEVNET_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator";
+const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+const TOKEN_PROGRAM_IDS = new Set([
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1sT3L4f5Y7W8X9Y",
+]);
 
 // Minimal inline isBlockhashValid read. Mirrors checkBlockhashExpired() in
 // src/x402.ts, which cannot be imported here: that module uses TypeScript
@@ -30,6 +46,82 @@ async function fetchBlockhashValidity(rpcUrl, blockhash, timeoutMs = 15000) {
   }
 }
 
+// Read-only finalized transaction inspection. Never submits, signs, or pays.
+async function fetchFinalizedTransaction(rpcUrl, signature, timeoutMs = 30000) {
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getTransaction",
+      params: [signature, { commitment: "finalized", encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) return null;
+  const data = await response.json();
+  return data?.result ?? null;
+}
+
+const str = (v) => (typeof v === "string" && v.length > 0 ? v : undefined);
+
+function inspectFinalizedForReconcile(tx, expected) {
+  if (!tx || typeof tx !== "object") return { ok: false, reason: "transaction not queryable (not finalized yet or unknown signature)" };
+  const slot = tx.slot;
+  if (typeof slot !== "number") return { ok: false, reason: "transaction has no slot" };
+  const meta = tx.meta;
+  const message = tx.transaction?.message;
+  if (!meta || !message) return { ok: false, reason: "transaction missing meta/message" };
+  if (!Object.prototype.hasOwnProperty.call(meta, "err") || meta.err !== null) {
+    return { ok: false, reason: "transaction did not complete successfully (meta.err was not null)" };
+  }
+  const topInstructions = Array.isArray(message.instructions) ? message.instructions : [];
+  const innerGroups = Array.isArray(meta.innerInstructions) ? meta.innerInstructions : [];
+  const innerInstructions = innerGroups.flatMap((g) => (Array.isArray(g?.instructions) ? g.instructions : []));
+  const all = [...topInstructions, ...innerInstructions];
+  const memoOk = all.some((ix) => ix?.program === "spl-memo" && ix?.programId === MEMO_PROGRAM_ID && ix?.parsed === expected.memo);
+  if (!memoOk) return { ok: false, reason: "exact request-bound memo not found in transaction" };
+  const accountKeys = Array.isArray(message.accountKeys)
+    ? message.accountKeys.map((k) => (typeof k === "string" ? k : str(k?.pubkey) ?? ""))
+    : [];
+  const postBalances = Array.isArray(meta.postTokenBalances) ? meta.postTokenBalances : [];
+  const preBalances = Array.isArray(meta.preTokenBalances) ? meta.preTokenBalances : [];
+  const candidates = [];
+  for (const ix of all) {
+    const programId = str(ix?.programId);
+    const program = str(ix?.program);
+    if ((programId && !TOKEN_PROGRAM_IDS.has(programId)) || (!programId && program !== "spl-token")) continue;
+    const parsed = ix?.parsed;
+    const info = parsed?.info;
+    const type = str(parsed?.type);
+    if (!info || (type !== "transfer" && type !== "transferChecked")) continue;
+    const tokenAmount = info.tokenAmount;
+    const destination = str(info.destination);
+    const source = str(info.source);
+    if (!destination) continue;
+    const destIdx = accountKeys.indexOf(destination);
+    const srcIdx = accountKeys.indexOf(source ?? "");
+    const destBal = postBalances.find((b) => b?.accountIndex === destIdx);
+    const srcBal = preBalances.find((b) => b?.accountIndex === srcIdx);
+    const mint = str(info.mint) ?? str(destBal?.mint);
+    const amount = str(tokenAmount?.amount) ?? str(info.amount);
+    const payer = str(info.authority) ?? str(info.owner) ?? str(srcBal?.owner);
+    if (!mint || !amount || !payer) continue;
+    const recipient = str(destBal?.owner) ?? (destIdx >= 0 ? accountKeys[destIdx] : undefined) ?? destination;
+    candidates.push({ mint, amount, recipient, payer });
+  }
+  const matches = candidates.filter((t) =>
+    t.mint === expected.asset && t.amount === expected.amount &&
+    t.recipient === expected.payee && t.payer === expected.payer,
+  );
+  if (candidates.length !== 1 || matches.length !== 1) {
+    return { ok: false, reason: "transaction does not contain exactly one expected token transfer (mint, amount, recipient and payer must match)" };
+  }
+  const feePayer = accountKeys.length > 0 && accountKeys[0] ? accountKeys[0] : "unknown";
+  return { ok: true, slot, feePayer, transfer: matches[0] };
+}
+
 const getFlag = (argv, flag) => {
   const idx = argv.indexOf(flag);
   return idx >= 0 && idx + 1 < argv.length ? argv[idx + 1] : undefined;
@@ -37,15 +129,9 @@ const getFlag = (argv, flag) => {
 
 const [, , command, ...rest] = process.argv;
 const wantsHelp = [command, ...rest].includes("--help") || [command, ...rest].includes("-h");
-if (command !== "release" || wantsHelp) {
+if ((command !== "release" && command !== "reconcile-settled") || wantsHelp) {
   console.log(OPERATOR_USAGE);
-  process.exit(wantsHelp || command === "release" ? 0 : 1);
-}
-
-const parsed = parseReleaseArgs(rest);
-if (!parsed.ok) {
-  console.error(`error: ${parsed.error}\n\n${OPERATOR_USAGE}`);
-  process.exit(1);
+  process.exit(wantsHelp ? 0 : 1);
 }
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -71,6 +157,123 @@ try {
     pgTransactable(pool),
     parseEncryptionKey(process.env.X402_STORE_ENC_KEY),
   );
+
+  if (command === "reconcile-settled") {
+    const parsed = parseReconcileSettledArgs(rest);
+    if (!parsed.ok) {
+      console.error(`error: ${parsed.error}\n\n${OPERATOR_USAGE}`);
+      process.exit(1);
+    }
+    const gate = validateReconcileSettledEvidence({
+      operatorId: parsed.args.operatorId,
+      txHash: parsed.args.txHash,
+      checkedSlot: parsed.args.checkedSlot,
+      note: parsed.args.note,
+    });
+    if (!gate.ok) {
+      console.error(`reconcile rejected: ${gate.reasons.join("; ")}`);
+      process.exit(1);
+    }
+    const row = await store.getByOperationId(parsed.args.operationId);
+    if (!row) {
+      console.error("error: unknown operation");
+      process.exit(1);
+    }
+    if (row.status === "settled") {
+      if (row.txHash !== parsed.args.txHash) {
+        console.error("error: attempt is already settled with a different transaction signature; refusing to rewrite");
+        process.exit(1);
+      }
+      console.log(`already-settled ${row.operationId} tx=${row.txHash} (no write, no resubmission)`);
+      process.exit(0);
+    }
+    if (row.status !== "settling" && row.status !== "awaiting_evidence") {
+      console.error(`error: reconcile requires status settling/awaiting_evidence (current: ${row.status}); terminal rows are never rewritten`);
+      process.exit(1);
+    }
+    if (row.txHash && row.txHash !== parsed.args.txHash) {
+      console.error("error: a different transaction signature is already bound to this attempt; refusing to overwrite");
+      process.exit(1);
+    }
+    if (!row.payer) {
+      console.error("error: attempt has no verified payer; cannot match the on-chain transfer");
+      process.exit(1);
+    }
+    const asset = getFlag(rest, "--asset") || USDC_DEVNET_MINT;
+    const amount = getFlag(rest, "--amount") || "10000";
+    const payee = getFlag(rest, "--payee") || "";
+    if (!payee) {
+      console.error("error: --payee <expected-recipient-pubkey> is required");
+      process.exit(1);
+    }
+    const facilitatorUrl = getFlag(rest, "--facilitator-url") || DEFAULT_FACILITATOR_URL;
+    // Read-only inspection: getTransaction only. No settle, no submit, no sign.
+    let tx = null;
+    try {
+      tx = await fetchFinalizedTransaction(rpcUrl, parsed.args.txHash);
+    } catch {
+      tx = null;
+    }
+    const verdict = inspectFinalizedForReconcile(tx, {
+      memo: `agentcart:v1:${row.requestDigest}`,
+      asset,
+      amount,
+      payee,
+      payer: row.payer,
+    });
+    if (!verdict.ok) {
+      console.error(`error: on-chain validation failed: ${verdict.reason}`);
+      process.exit(1);
+    }
+    if (verdict.slot !== parsed.args.checkedSlot) {
+      console.error(`error: cited --slot ${parsed.args.checkedSlot} does not match chain slot ${verdict.slot}; re-inspect and cite the observed slot`);
+      process.exit(1);
+    }
+    const feePayer = getFlag(rest, "--fee-payer") || verdict.feePayer;
+    const evidence = {
+      paymentIdentifier: row.callerPaymentId ?? "",
+      network: SOLANA_DEVNET_CAIP2,
+      asset,
+      amount,
+      payer: row.payer,
+      payee,
+      feePayer,
+      transactionHash: parsed.args.txHash,
+      facilitatorUrl,
+      verificationResult: "verified",
+      settlementResult: "reconciled",
+      requestDigest: row.requestDigest,
+      timestamp: new Date().toISOString(),
+      explorerUrl: `https://explorer.solana.com/tx/${parsed.args.txHash}?cluster=devnet`,
+      memoVerification: "verified",
+      transferVerification: "verified",
+      transfer: verdict.transfer,
+    };
+    const persisted = await persistReconciledSettlement(store, {
+      operationId: row.operationId,
+      operatorId: parsed.args.operatorId,
+      txHash: parsed.args.txHash,
+      checkedSlot: verdict.slot,
+      note: parsed.args.note,
+      evidenceJson: evidence,
+    });
+    if (!persisted.ok) {
+      console.error(`error: ${persisted.reasons.join("; ")}; no write performed`);
+      process.exit(1);
+    }
+    if (persisted.alreadySettled) {
+      console.log(`already-settled ${persisted.row.operationId} tx=${persisted.row.txHash} (no resubmission)`);
+      process.exit(0);
+    }
+    console.log(`reconciled ${persisted.row.operationId} -> settled tx=${persisted.row.txHash} slot=${verdict.slot}`);
+    process.exit(0);
+  }
+
+  const parsed = parseReleaseArgs(rest);
+  if (!parsed.ok) {
+    console.error(`error: ${parsed.error}\n\n${OPERATOR_USAGE}`);
+    process.exit(1);
+  }
   const row = await store.getByOperationId(parsed.args.operationId);
   if (!row) {
     console.error("error: unknown operation");

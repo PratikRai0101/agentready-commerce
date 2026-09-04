@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DevnetMachineResource } from "@agentready/payments/devnet-machine";
 import {
   InMemorySettlementStore,
+  PostgresSettlementStore,
   assertSettlementStoreAllowed,
   buildOperationId,
   validateReleaseEvidence,
@@ -547,5 +548,92 @@ describe("pre-settle revalidation happens twice per settlement", () => {
     expect(res.status).toBe(202);
     expect(revalidations).toBe(2);
     expect(settlePayment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("postgres transition history carries a single enum status (offline executor stub)", () => {
+  // Production incident: transition() wrote from.join(",") into the
+  // from_status enum column, so every multi-candidate transition
+  // (settling/awaiting_evidence→settled) rolled back and the attempt stayed
+  // settling with no signature while the chain had finalized. No database,
+  // no network: a stub executor captures the history INSERT params.
+  it("records the observed single status, never the candidate list", async () => {
+    const seen: Array<{ text: string; params: unknown[] }> = [];
+    const dbRow = {
+      operation_id: "op_hist_1",
+      logical_order_id: "ord_hist_1",
+      intent_version: 1,
+      request_digest: DIGEST,
+      resource: "/api/resources/premium-fit-score",
+      auth_revision: "sauth_hist",
+      caller_payment_id: "pay_hist_01",
+      signed_payload_enc: null,
+      payload_digest: null,
+      payer: "Payer11111111111111111111111111111111",
+      blockhash: "BhHist11111111111111111111111111111",
+      requirements_json: {},
+      status: "settled",
+      tx_hash: "tx_hist_1",
+      evidence_json: {},
+      lease_owner: "worker-h",
+      lease_expires_at: new Date().toISOString(),
+      fence_token: "fence-h",
+      released_to_approval: null,
+      released_by: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const fakeExec = {
+      query: async (text: string, params?: unknown[]) => {
+        seen.push({ text, params: params ?? [] });
+        if (text.startsWith("SELECT status")) {
+          return { rows: [{ status: "settling" }], rowCount: 1 };
+        }
+        if (text.startsWith("UPDATE")) {
+          return { rows: [dbRow], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      },
+      transaction: async <T>(fn: (tx: { query: (t: string, p?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }> }) => Promise<T>): Promise<T> => {
+        return fn(fakeExec as never);
+      },
+    };
+    const store = new PostgresSettlementStore(fakeExec as never, Buffer.alloc(32));
+    const settled = await store.transition(
+      "op_hist_1", ["settling", "awaiting_evidence"], "settled",
+      { txHash: "tx_hist_1" }, "worker-h", "fence-h", "complete-settlement", "settlementResult=settled",
+    );
+    expect(settled?.status).toBe("settled");
+    const historyInsert = seen.find((q) => q.text.startsWith("INSERT INTO x402_reconciliation_history"));
+    expect(historyInsert).toBeDefined();
+    // from_status is the single observed enum value — never "settling,awaiting_evidence".
+    expect(historyInsert!.params[1]).toBe("settling");
+    expect(historyInsert!.params[2]).toBe("settled");
+  });
+});
+
+describe("operator reconcile-settled parsing (no database)", () => {
+  it("parses a complete reconcile-settled command", async () => {
+    const { parseReconcileSettledArgs, validateReconcileSettledEvidence } = await import("@agentready/payments/operator");
+    const parsed = parseReconcileSettledArgs([
+      "--operation", "op1", "--operator", "op_test", "--tx", "5".repeat(44),
+      "--slot", "493082743", "--note", "incident reconcile",
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || !parsed.args) throw new Error("expected parsed args");
+    expect(validateReconcileSettledEvidence({
+      operatorId: parsed.args.operatorId, txHash: parsed.args.txHash,
+      checkedSlot: parsed.args.checkedSlot, note: parsed.args.note,
+    }).ok).toBe(true);
+  });
+
+  it("rejects missing/invalid reconcile flags without touching any store", async () => {
+    const { parseReconcileSettledArgs, validateReconcileSettledEvidence } = await import("@agentready/payments/operator");
+    expect(parseReconcileSettledArgs([]).ok).toBe(false);
+    expect(parseReconcileSettledArgs(["--operation", "op1", "--operator", "o", "--tx", "short", "--slot", "1", "--note", "n"]).ok).toBe(true);
+    expect(validateReconcileSettledEvidence({ operatorId: "o", txHash: "short", checkedSlot: 1, note: "n" }).ok).toBe(false);
+    expect(validateReconcileSettledEvidence({ operatorId: "", txHash: "5".repeat(44), checkedSlot: 1, note: "n" }).ok).toBe(false);
+    expect(validateReconcileSettledEvidence({ operatorId: "o", txHash: "5".repeat(44), checkedSlot: -1, note: "n" }).ok).toBe(false);
+    expect(validateReconcileSettledEvidence({ operatorId: "o", txHash: "5".repeat(44), checkedSlot: 1, note: "" }).ok).toBe(false);
   });
 });

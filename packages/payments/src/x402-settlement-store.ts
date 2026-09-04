@@ -274,9 +274,9 @@ export type SettlementStore = {
   /** Sweeper claim over expired leases. */
   claimForReconcile(owner: string, leaseTtlMs: number, limit?: number): Promise<StoredAttempt[]>;
   /**
-   * Single-row takeover claim: atomically takes `settling` rows whose lease
-   * has expired, with a fresh fence. Used when re-driving a lapsed attempt;
-   * never touches other rows.
+   * Single-row takeover claim: atomically takes `settling` or
+   * `awaiting_evidence` rows whose lease has expired, with a fresh fence.
+   * Used when re-driving a lapsed attempt; never touches other rows.
    */
   claimRowForTakeover(operationId: string, owner: string, leaseTtlMs: number): Promise<StoredAttempt | null>;
   releaseAttempt(operationId: string, evidence: ReleaseEvidence): Promise<{ ok: boolean; row?: StoredAttempt; reasons?: string[] }>;
@@ -551,13 +551,23 @@ export class PostgresSettlementStore implements SettlementStore {
       idx += 1;
     }
     const result = await this.exec.transaction(async (tx) => {
+      // Observe the single current status under lock first: the history row
+      // carries one enum value, never the multi-status `from` candidate list
+      // (writing from.join(",") violates the enum and rolls the transition
+      // back — the production cause of a settled-but-unpersisted attempt).
+      const current = await tx.query(
+        `SELECT status FROM x402_settlement_attempts WHERE operation_id = $1 FOR UPDATE`,
+        [operationId],
+      );
+      const currentStatus = current.rows[0]?.status as string | undefined;
+      if (!currentStatus || !(from as string[]).includes(currentStatus)) return null;
       const updated = await tx.query(
         `UPDATE x402_settlement_attempts SET ${sets.join(", ")} WHERE ${where} RETURNING *`,
         params,
       );
       const row = updated.rows[0];
       if (!row) return null;
-      await this.appendHistoryOn(tx, operationId, from.join(","), to, trigger, note, owner);
+      await this.appendHistoryOn(tx, operationId, currentStatus, to, trigger, note, owner);
       return rowFromDb(row);
     });
     return result;
@@ -569,7 +579,7 @@ export class PostgresSettlementStore implements SettlementStore {
     const result = await this.exec.query(
       `UPDATE x402_settlement_attempts
        SET lease_owner = $2, lease_expires_at = $3::timestamptz, fence_token = $4, updated_at = now()
-       WHERE operation_id = $1 AND status = 'settling'
+       WHERE operation_id = $1 AND status IN ('settling','awaiting_evidence')
          AND (lease_expires_at IS NULL OR lease_expires_at < now()) RETURNING *`,
       [operationId, owner, expiresAt, fence],
     );
@@ -881,7 +891,7 @@ export class InMemorySettlementStore implements SettlementStore {
 
   async claimRowForTakeover(operationId: string, owner: string, leaseTtlMs: number): Promise<StoredAttempt | null> {
     const row = this.attempts.get(operationId);
-    if (!row || row.status !== "settling") return null;
+    if (!row || !["settling", "awaiting_evidence"].includes(row.status)) return null;
     if (row.leaseExpiresAt && Date.parse(row.leaseExpiresAt) > Date.now()) return null;
     row.leaseOwner = owner;
     row.leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();

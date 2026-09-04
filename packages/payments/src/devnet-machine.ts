@@ -322,7 +322,15 @@ export class DevnetMachineResource {
       detail: string,
       retryable: boolean,
     ): Promise<DevnetResourceResult> => {
-      await this.store.transition(operationId, ["settling", "awaiting_evidence"], to, { txHash: adapted.transactionHash }, owner, fenceToken, "complete-settlement", detail);
+      // Persistence itself may be down (the settled-but-unpersisted
+      // incident): never let a history-write failure lose the signature.
+      // The body always carries the transaction hash when one exists, so an
+      // operator can reconcile without resubmission.
+      try {
+        await this.store.transition(operationId, ["settling", "awaiting_evidence"], to, { txHash: adapted.transactionHash }, owner, fenceToken, "complete-settlement", detail);
+      } catch {
+        /* persistence unavailable; the signature below is the recovery path */
+      }
       return {
         status: to === "awaiting_evidence" ? 202 : 502,
         body: {
@@ -383,11 +391,31 @@ export class DevnetMachineResource {
       transfer: inspection.transfer,
     };
 
-    const settled = await this.store.transition(
-      operationId, ["settling", "awaiting_evidence"], "settled",
-      { txHash: adapted.transactionHash, evidenceJson: settlementEvidence as unknown as Record<string, unknown> },
-      owner, fenceToken, "complete-settlement", `settlementResult=${settlementResult}`,
-    );
+    let settled = null;
+    try {
+      settled = await this.store.transition(
+        operationId, ["settling", "awaiting_evidence"], "settled",
+        { txHash: adapted.transactionHash, evidenceJson: settlementEvidence as unknown as Record<string, unknown> },
+        owner, fenceToken, "complete-settlement", `settlementResult=${settlementResult}`,
+      );
+    } catch {
+      // Chain finalized but the settled write failed (persistence outage):
+      // surface the signature for operator reconciliation instead of a 500
+      // that loses it. No resubmission — retry reconciles the original.
+      return {
+        status: 202,
+        body: {
+          error: "settlement_ambiguous",
+          detail: "Settlement completed on-chain but confirmation persistence failed; retry to reconcile the original attempt without submitting another payment.",
+          paymentIdentifier,
+          requestDigest,
+          reconciliationState: "pending",
+          retryable: true,
+          transactionHash: adapted.transactionHash,
+        },
+        headers: {},
+      };
+    }
     if (!settled) {
       // Lost a race (lease stolen or already terminal): converge on the winner.
       const current = await this.store.getByOperationId(operationId);
@@ -988,7 +1016,7 @@ export class DevnetMachineResource {
           method: "getTransaction",
           params: [
             transactionHash,
-            { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
+            { commitment: "finalized", encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
           ],
         }),
         signal: AbortSignal.timeout(rpcTimeoutMs()),
@@ -1083,7 +1111,7 @@ export class DevnetMachineResource {
         && transfer.payer === expectedTransfer.payer,
       );
 
-      if (matchingTransfers.length !== 1) {
+      if (parsedTransfers.length !== 1 || matchingTransfers.length !== 1) {
         return {
           memoVerification,
           transferVerification: "mismatch",

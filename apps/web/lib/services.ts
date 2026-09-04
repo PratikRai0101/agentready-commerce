@@ -2019,6 +2019,30 @@ function servicesReconcileHeld(
   });
 }
 
+type AuditLogInput = Parameters<ReturnType<typeof createAuditLedger>["log"]>[0];
+
+async function logMachineSpendAuditOnce(
+  audit: ReturnType<typeof createAuditLedger>,
+  input: AuditLogInput,
+): Promise<void> {
+  try {
+    const paymentIdentifier = input.externalReferences?.paymentIdentifier;
+    const requestDigest = input.externalReferences?.requestDigest ?? input.inputDigest;
+    if (paymentIdentifier && requestDigest) {
+      const existing = await audit.timeline(input.logicalOrderId);
+      const alreadyRecorded = existing.some((event) => event.type === input.type
+        && event.externalReferences?.paymentIdentifier === paymentIdentifier
+        && (event.externalReferences?.requestDigest ?? event.inputDigest) === requestDigest);
+      if (alreadyRecorded) return;
+    }
+    await audit.log(input);
+  } catch {
+    // Payment outcomes must not become HTTP failures because an audit
+    // projection is temporarily unavailable.
+    console.error("machine spend audit append failed");
+  }
+}
+
 async function runFitScoreSpend(
   session: Session,
   resource: DemoMachineResource,
@@ -2036,7 +2060,7 @@ async function runFitScoreSpend(
       devnetResource = machine.getDevnetMachineResource();
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      void audit.log({
+      await logMachineSpendAuditOnce(audit, {
         logicalOrderId: orderId,
         type: "machine.spend_failed",
         actor: "agent",
@@ -2083,7 +2107,7 @@ async function runFitScoreSpend(
       existingAttempt.status = "manual_reconciliation_required";
       existingAttempt.retryable = false;
       existingAttempt.lastError = "The intent changed while the original tool-payment attempt was unresolved. Manual reconciliation is required; no replacement payment will be submitted.";
-      void audit.log({
+      await logMachineSpendAuditOnce(audit, {
         logicalOrderId: orderId,
         type: "machine.spend_manual_reconciliation",
         actor: "agent",
@@ -2137,7 +2161,7 @@ async function runFitScoreSpend(
         persistedAttempt.status = "manual_reconciliation_required";
         persistedAttempt.retryable = false;
         persistedAttempt.lastError = `Tool-payment processing failed after the signed attempt was retained. Manual reconciliation is required; no replacement payment will be submitted. ${errorMsg}`;
-        void audit.log({
+        await logMachineSpendAuditOnce(audit, {
           logicalOrderId: orderId,
           type: "machine.spend_manual_reconciliation",
           actor: "agent",
@@ -2150,7 +2174,7 @@ async function runFitScoreSpend(
           reasonCodes: ["x402_manual_reconciliation_required", "x402_devnet_spend_error"],
         });
       } else {
-        void audit.log({
+        await logMachineSpendAuditOnce(audit, {
           logicalOrderId: orderId,
           type: "machine.spend_failed",
           actor: "agent",
@@ -2173,7 +2197,7 @@ async function runFitScoreSpend(
         persistedAttempt.status = reconciliationState;
         persistedAttempt.retryable = outcome.retryable ?? reconciliationState === "pending";
         persistedAttempt.lastError = outcome.error;
-        void audit.log({
+        await logMachineSpendAuditOnce(audit, {
           logicalOrderId: orderId,
           type: reconciliationState === "pending" ? "machine.spend_pending" : "machine.spend_manual_reconciliation",
           actor: "agent",
@@ -2195,7 +2219,7 @@ async function runFitScoreSpend(
           persistedAttempt.retryable = false;
           persistedAttempt.lastError = outcome.error;
         }
-        void audit.log({
+        await logMachineSpendAuditOnce(audit, {
           logicalOrderId: orderId,
           type: "machine.spend_failed",
           actor: "agent",
@@ -2232,7 +2256,7 @@ async function runFitScoreSpend(
       settlementMode: "devnet",
     };
 
-    void audit.log({
+    await logMachineSpendAuditOnce(audit, {
       logicalOrderId: orderId,
       type: "machine.paid_resource",
       actor: "agent",
