@@ -16,7 +16,7 @@ import { INTERPRETER_SCHEMA_VERSION, type StructuredInterpretation } from "./sch
 import { validateInterpretation, type ValidationResult } from "./validate";
 import { deterministicInterpretation } from "./deterministic";
 
-export type FallbackReason = "disabled" | "timeout" | "http" | "malformed" | "invalid_schema" | "empty";
+export type FallbackReason = "disabled" | "timeout" | "http" | "malformed" | "invalid_schema" | "empty" | "budget_exhausted";
 
 export type InterpretationOutcome = {
   source: "llm" | "deterministic";
@@ -47,7 +47,7 @@ export async function interpretUserMessage(
   }
 
   if (!call.ok) {
-    const reason = call.reason === "timeout" || call.reason === "http" || call.reason === "malformed" || call.reason === "empty"
+    const reason = call.reason === "timeout" || call.reason === "http" || call.reason === "malformed" || call.reason === "empty" || call.reason === "budget_exhausted"
       ? (call.reason as FallbackReason)
       : "http";
     return deterministicOutcome(message, currentIntent, reason);
