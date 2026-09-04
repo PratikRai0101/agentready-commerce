@@ -114,11 +114,13 @@ describeOrSkip("postgres migrations (disposable instance)", () => {
     const names = indexes.rows.map((r) => r.indexname);
     expect(names).toContain("ux_active_order_intent");
     expect(names).toContain("ux_pid_active");
+    expect(names).toContain("ux_payment_id_once");
+    expect(names).toContain("ux_settled_request_once");
     const columns = await pgQuery(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'x402_settlement_attempts'",
     );
     const cols = columns.rows.map((r) => r.column_name);
-    for (const required of ["operation_id", "auth_revision", "blockhash", "lease_owner", "fence_token", "released_to_approval"]) {
+    for (const required of ["operation_id", "auth_revision", "blockhash", "lease_owner", "fence_token", "released_to_approval", "release_evidence_json"]) {
       expect(cols).toContain(required);
     }
   });
@@ -294,19 +296,20 @@ describeOrSkip("rbac: app role technically cannot release (trigger-enforced)", (
     expect(check.rows[0]?.status).toBe("manual");
   });
 
-  it("x402_app retains legitimate non-release writes (trigger is narrow)", async () => {
+  it("x402_app cannot bypass the state machine with direct writes", async () => {
     const operationId = await seedManualRow("narrow");
-    await withRole("x402_app", async (query) => {
-      await query(`UPDATE x402_settlement_attempts SET status = 'awaiting_evidence', tx_hash = 'tx_test' WHERE operation_id = $1`, [operationId]);
-    });
+    await expect(
+      withRole("x402_app", (query) =>
+        query(`UPDATE x402_settlement_attempts SET status = 'awaiting_evidence', tx_hash = 'tx_test' WHERE operation_id = $1`, [operationId])),
+    ).rejects.toThrow(/x402|42501/);
     const check = await pgQuery("SELECT status, tx_hash FROM x402_settlement_attempts WHERE operation_id = $1", [operationId]);
-    expect(check.rows[0]?.status).toBe("awaiting_evidence");
+    expect(check.rows[0]?.status).toBe("manual");
   });
 
   it("x402_operator can write released", async () => {    const operationId = await seedManualRow("op");
     await withRole("x402_operator", async (query) => {
       await query(
-        `UPDATE x402_settlement_attempts SET status = 'released', released_to_approval = 'appr_test', released_by = 'op_test', updated_at = now() WHERE operation_id = $1`,
+        `UPDATE x402_settlement_attempts SET status = 'released', released_to_approval = 'appr_test', released_by = 'op_test', release_evidence_json = '{}'::jsonb, updated_at = now() WHERE operation_id = $1`,
         [operationId],
       );
     });
@@ -319,9 +322,9 @@ describeOrSkip("rbac: app role technically cannot release (trigger-enforced)", (
     await expect(
       pgQuery(
         `INSERT INTO x402_settlement_attempts
-           (operation_id, logical_order_id, intent_version, request_digest, resource, auth_revision, status)
-         VALUES ($1, 'ord_rbac_insert', 1, $2, '/api/resources/premium-fit-score', 'sauth_x', 'released')`,
-        [operationId, "e".repeat(64)],
+           (operation_id, logical_order_id, intent_version, request_digest, resource, auth_revision, caller_payment_id, status)
+         VALUES ($1, 'ord_rbac_insert', 1, $2, '/api/resources/premium-fit-score', 'sauth_x', $3, 'released')`,
+        [operationId, "e".repeat(64), `pay_${operationId}`],
       ),
     ).rejects.toThrow(/released.*forbidden|42501/);
     const check = await pgQuery("SELECT operation_id FROM x402_settlement_attempts WHERE operation_id = $1", [operationId]);

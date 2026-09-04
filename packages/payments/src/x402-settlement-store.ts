@@ -477,6 +477,7 @@ export class PostgresSettlementStore implements SettlementStore {
     });
     try {
       const result = await this.exec.transaction(async (tx) => {
+        await tx.query("SELECT set_config('x402_store_history_recorded', 'true', true)");
         const inserted = await tx.query(
           `INSERT INTO x402_settlement_attempts
              (operation_id, logical_order_id, intent_version, request_digest, resource, auth_revision, caller_payment_id, requirements_json)
@@ -603,6 +604,7 @@ export class PostgresSettlementStore implements SettlementStore {
       where += " AND lease_expires_at > now()";
     }
     const result = await this.exec.transaction(async (tx) => {
+      await tx.query("SELECT set_config('x402_store_history_recorded', 'true', true)");
       // Observe the single current status under lock first: the history row
       // carries one enum value, never the multi-status `from` candidate list
       // (writing from.join(",") violates the enum and rolls the transition
@@ -664,6 +666,7 @@ export class PostgresSettlementStore implements SettlementStore {
     const gate = validateReleaseEvidence(evidence);
     if (!gate.ok) return { ok: false, reasons: gate.reasons };
     const released = await this.exec.transaction(async (tx) => {
+      await tx.query("SELECT set_config('x402_store_history_recorded', 'true', true)");
       const result = await tx.query(
         `UPDATE x402_settlement_attempts
          SET status = 'released', released_to_approval = $2, released_by = $3,
