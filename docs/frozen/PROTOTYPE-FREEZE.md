@@ -1,9 +1,9 @@
 # Prototype Freeze — Decision Ledger v2
 
-**Frozen:** 2026-09-03  
-**File:** `apps/web/app/ledger-prototype/page.tsx`  
-**SHA256:** `92b08d29fc65f9a09bd5f4d1b93fb5d58c3c24519674099bc8ecf20d82b5abd8`  
-**Copy:** `docs/frozen/ledger-prototype-v2-frozen-2026-09-03.tsx`  
+**Frozen:** 2026-09-03\
+**File:** `apps/web/app/ledger-prototype/page.tsx`\
+**SHA256:** `92b08d29fc65f9a09bd5f4d1b93fb5d58c3c24519674099bc8ecf20d82b5abd8`\
+**Copy:** `docs/frozen/ledger-prototype-v2-frozen-2026-09-03.tsx`\
 **Size:** 1044 lines, 17.6kB (build)
 
 **Status:** Frozen for visual approval. **Do not edit** `apps/web/app/ledger-prototype/page.tsx` until approval is granted. All further changes must be tracked as separate commits and must not be merged into `main` shop flow.
