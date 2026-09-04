@@ -23,10 +23,10 @@ jobs:
       NEXT_TELEMETRY_DISABLED: "1"
       X402_MODE: mock
       X402_LIVE_DEVNET_TEST: "0"
-      X402_SETTLEMENT_ENABLED: "false"
+      X402_SETTLEMENT_ENABLED: "true"
       X402_TEST_PG: "1"
       TEST_PG_URL: postgresql://ci:ci@127.0.0.1:5432/agentready_ci
-      TEST_PG_ENC_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      TEST_PG_ENC_KEY: "abababababababababababababababababababababababababababababababab"
       ENVELOPE_SIGNING_SECRET: ci-only-placeholder
       RAZORPAY_KEY_ID: ""
       RAZORPAY_KEY_SECRET: ""
