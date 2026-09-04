@@ -281,7 +281,7 @@ describe("release evidence gating (canonical blockhash validity)", () => {
   const base = {
     operatorId: "op_test",
     newApprovalEventId: "appr_new_9",
-    transferVerification: "unavailable",
+    transferVerification: "unavailable" as const,
     note: "reviewed; no funds moved",
   };
   const expired = {
@@ -407,6 +407,16 @@ describe("operator CLI parsing (no database)", () => {
       "--transfer", "unavailable", "--note", "ok",
     ]);
     expect(parsed.ok).toBe(true);
+  });
+
+  it("rejects a release command that claims a verified transfer", async () => {
+    const { parseReleaseArgs } = await import("@agentready/payments/operator");
+    const parsed = parseReleaseArgs([
+      "--operation", "op1", "--operator", "op_test", "--new-approval", "appr_1",
+      "--transfer", "verified", "--note", "must reconcile",
+    ]);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("must be mismatch or unavailable");
   });
 
   it("rejects missing/invalid flags without touching any store", async () => {

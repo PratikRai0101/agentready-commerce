@@ -65,6 +65,7 @@ export type StoredAttempt = {
   status: AttemptStatus;
   txHash: string | null;
   evidenceJson: unknown;
+  releaseEvidenceJson: unknown;
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   fenceToken: string | null;
@@ -117,7 +118,7 @@ export type ReleaseEvidence = {
   blockhashValid: boolean;
   /** Chain slot at which validity was checked (audit context; always present). */
   checkedSlot: number;
-  transferVerification: string;
+  transferVerification: "verified" | "mismatch" | "unavailable";
 };
 
 function rowFromDb(row: Record<string, unknown>): StoredAttempt {
@@ -139,6 +140,7 @@ function rowFromDb(row: Record<string, unknown>): StoredAttempt {
     status: row.status as AttemptStatus,
     txHash: str(row.tx_hash),
     evidenceJson: row.evidence_json ?? null,
+    releaseEvidenceJson: row.release_evidence_json ?? null,
     leaseOwner: str(row.lease_owner),
     leaseExpiresAt: row.lease_expires_at ? String(row.lease_expires_at) : null,
     fenceToken: str(row.fence_token),
@@ -199,7 +201,7 @@ export function validateReleaseEvidence(evidence: ReleaseEvidence): { ok: boolea
   if (!Number.isInteger(evidence.checkedSlot) || evidence.checkedSlot < 0) {
     reasons.push("checkedSlot must be the integer chain slot of the validity check");
   }
-  if (evidence.transferVerification === "verified") {
+  if (evidence.transferVerification !== "mismatch" && evidence.transferVerification !== "unavailable") {
     reasons.push("chain shows a verified settlement for this attempt; release is wrong, reconcile instead");
   }
   if (!evidence.note || evidence.note.length === 0) reasons.push("operator note is required");
@@ -528,14 +530,14 @@ export class PostgresSettlementStore implements SettlementStore {
     const fence = randomUUID();
     // Expiry is computed caller-side; all expiry *comparisons* use DB now().
     // First claimer stamps the signed payload atomically with the claim.
-    const expiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
     const result = await this.exec.query(
       `UPDATE x402_settlement_attempts
-       SET status = 'settling', lease_owner = $2, lease_expires_at = $3::timestamptz, fence_token = $4,
+       SET status = 'settling', lease_owner = $2,
+           lease_expires_at = now() + ($3::double precision * interval '1 millisecond'), fence_token = $4,
            signed_payload_enc = COALESCE(signed_payload_enc, $5), payload_digest = COALESCE(payload_digest, $6),
            updated_at = now()
        WHERE operation_id = $1 AND status = 'pending' RETURNING *`,
-      [operationId, owner, expiresAt, fence, sealedPayload ?? null, payloadDigest ?? null],
+      [operationId, owner, leaseTtlMs, fence, sealedPayload ?? null, payloadDigest ?? null],
     );
     const row = result.rows[0];
     return row ? rowFromDb(row) : null;
@@ -547,13 +549,12 @@ export class PostgresSettlementStore implements SettlementStore {
     fenceToken: string,
     leaseTtlMs: number,
   ): Promise<StoredAttempt | null> {
-    const expiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
     const result = await this.exec.query(
       `UPDATE x402_settlement_attempts
-       SET lease_expires_at = $4::timestamptz, updated_at = now()
+       SET lease_expires_at = now() + ($4::double precision * interval '1 millisecond'), updated_at = now()
        WHERE operation_id = $1 AND status = 'settling' AND lease_owner = $2 AND fence_token = $3
-         AND lease_expires_at > now() RETURNING *`,
-      [operationId, owner, fenceToken, expiresAt],
+          AND lease_expires_at > now() RETURNING *`,
+      [operationId, owner, fenceToken, leaseTtlMs],
     );
     const row = result.rows[0];
     return row ? rowFromDb(row) : null;
@@ -569,6 +570,10 @@ export class PostgresSettlementStore implements SettlementStore {
     trigger: string,
     note: string,
   ): Promise<StoredAttempt | null> {
+    const leaseBound = owner !== null || fenceToken !== null;
+    const pendingStage = from.length === 1 && from[0] === "pending" && to === "pending";
+    if (!pendingStage && !leaseBound) return null;
+    if (leaseBound && (owner === null || fenceToken === null)) return null;
     const sets: string[] = ["status = $2", "updated_at = now()"];
     const params: unknown[] = [operationId, to];
     let idx = 3;
@@ -592,11 +597,10 @@ export class PostgresSettlementStore implements SettlementStore {
       where += ` AND lease_owner = $${idx}`;
       params.push(owner);
       idx += 1;
-    }
-    if (fenceToken !== null) {
       where += ` AND fence_token = $${idx}`;
       params.push(fenceToken);
       idx += 1;
+      where += " AND lease_expires_at > now()";
     }
     const result = await this.exec.transaction(async (tx) => {
       // Observe the single current status under lock first: the history row
@@ -622,32 +626,36 @@ export class PostgresSettlementStore implements SettlementStore {
   }
 
   async claimRowForTakeover(operationId: string, owner: string, leaseTtlMs: number): Promise<StoredAttempt | null> {
-    const expiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
     const fence = randomUUID();
     const result = await this.exec.query(
       `UPDATE x402_settlement_attempts
-       SET lease_owner = $2, lease_expires_at = $3::timestamptz, fence_token = $4, updated_at = now()
+       SET lease_owner = $2,
+           lease_expires_at = now() + ($3::double precision * interval '1 millisecond'), fence_token = $4, updated_at = now()
        WHERE operation_id = $1 AND status IN ('settling','awaiting_evidence')
-         AND (lease_expires_at IS NULL OR lease_expires_at < now()) RETURNING *`,
-      [operationId, owner, expiresAt, fence],
+         AND (lease_expires_at IS NULL OR lease_expires_at <= now()) RETURNING *`,
+      [operationId, owner, leaseTtlMs, fence],
     );
     const row = result.rows[0];
     return row ? rowFromDb(row) : null;
   }
 
   async claimForReconcile(owner: string, leaseTtlMs: number, limit = 10): Promise<StoredAttempt[]> {
-    const expiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
     const fence = randomUUID();
     const result = await this.exec.query(
       `UPDATE x402_settlement_attempts
-       SET lease_owner = $1, lease_expires_at = $2::timestamptz, fence_token = $3, updated_at = now()
+       SET lease_owner = $1,
+           lease_expires_at = now() + ($2::double precision * interval '1 millisecond'), fence_token = $3, updated_at = now()
        WHERE operation_id IN (
-         SELECT operation_id FROM x402_settlement_attempts
-         WHERE status IN ('settling','awaiting_evidence')
-           AND (lease_expires_at IS NULL OR lease_expires_at < now())
-         ORDER BY updated_at ASC LIMIT $4
-       ) RETURNING *`,
-      [owner, expiresAt, fence, limit],
+          SELECT operation_id FROM x402_settlement_attempts
+          WHERE status IN ('settling','awaiting_evidence')
+            AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+          ORDER BY updated_at ASC LIMIT $4
+          FOR UPDATE SKIP LOCKED
+        )
+         AND status IN ('settling','awaiting_evidence')
+         AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+       RETURNING *`,
+      [owner, leaseTtlMs, fence, limit],
     );
     return result.rows.map(rowFromDb);
   }
@@ -658,14 +666,29 @@ export class PostgresSettlementStore implements SettlementStore {
     const released = await this.exec.transaction(async (tx) => {
       const result = await tx.query(
         `UPDATE x402_settlement_attempts
-         SET status = 'released', released_to_approval = $2, released_by = $3, updated_at = now()
+         SET status = 'released', released_to_approval = $2, released_by = $3,
+             release_evidence_json = $5::jsonb, updated_at = now()
          WHERE operation_id = $1 AND status = 'manual' AND blockhash IS NOT NULL AND blockhash = $4 RETURNING *`,
-        [operationId, evidence.newApprovalEventId, evidence.operatorId, evidence.blockhash],
+        [
+          operationId,
+          evidence.newApprovalEventId,
+          evidence.operatorId,
+          evidence.blockhash,
+          JSON.stringify(evidence),
+        ],
       );
       const row = result.rows[0];
       if (!row) return null;
       const parsed = rowFromDb(row);
-      await this.appendHistoryOn(tx, operationId, "manual", "released", "operator-release", `${evidence.operatorId}: ${evidence.note}`, evidence.operatorId);
+      await this.appendHistoryOn(
+        tx,
+        operationId,
+        "manual",
+        "released",
+        "operator-release",
+        `${evidence.operatorId}: ${evidence.note} (blockhash=${evidence.blockhash.slice(0, 8)}..., slot=${evidence.checkedSlot}, transfer=${evidence.transferVerification})`,
+        evidence.operatorId,
+      );
       return parsed;
     });
     if (!released) {
@@ -888,6 +911,7 @@ export class InMemorySettlementStore implements SettlementStore {
       status: "pending",
       txHash: null,
       evidenceJson: null,
+      releaseEvidenceJson: null,
       leaseOwner: null,
       leaseExpiresAt: null,
       fenceToken: null,
@@ -1008,6 +1032,7 @@ export class InMemorySettlementStore implements SettlementStore {
     row.status = "released";
     row.releasedToApproval = evidence.newApprovalEventId;
     row.releasedBy = evidence.operatorId;
+    row.releaseEvidenceJson = { ...evidence };
     row.updatedAt = new Date().toISOString();
     this.history.push({ operationId, from: "manual", to: "released", trigger: "operator-release", note: `${evidence.operatorId}: ${evidence.note}` });
     return { ok: true, row: this.clone(row) };
@@ -1095,12 +1120,15 @@ export function pgTransactable(pool: Pool): TransactableExecutor {
   };
 }
 
-export function createSettlementPool(databaseUrl: string, opts?: { poolMax?: number; statementTimeoutMs?: number }): Pool {  return new Pool({
+export function createSettlementPool(databaseUrl: string, opts?: { poolMax?: number; statementTimeoutMs?: number }): Pool {
+  return new Pool({
     connectionString: databaseUrl,
     max: opts?.poolMax ?? 3,
     connectionTimeoutMillis: 10_000,
     statement_timeout: opts?.statementTimeoutMs ?? 15_000,
     idle_in_transaction_session_timeout: 15_000,
-    ssl: /sslmode=(require|verify-full|verify-ca)/.test(databaseUrl) ? { rejectUnauthorized: true } : undefined,
+    // x402 app storage is never allowed over plaintext. Supabase's CA is
+    // supplied through NODE_EXTRA_CA_CERTS in deployment environments.
+    ssl: { rejectUnauthorized: true },
   });
 }

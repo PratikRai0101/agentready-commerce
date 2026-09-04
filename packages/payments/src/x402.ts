@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { base58 } from "@scure/base";
 import { type X402Config, type X402DevnetConfig, type X402MockConfig } from "./x402-config";
 export type { X402Config, X402DevnetConfig, X402MockConfig } from "./x402-config";
 
@@ -155,6 +156,37 @@ export async function extractTransactionBlockhash(encodedPayment: string): Promi
       return message.lifetimeToken;
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the first Solana transaction signature from the stored signed wire
+ * transaction. Release uses this only for a read-only RPC existence check;
+ * failure to decode is refusal, never evidence that no transaction exists.
+ */
+export function extractTransactionSignature(encodedPayment: string): string | null {
+  try {
+    const envelope = JSON.parse(Buffer.from(encodedPayment, "base64url").toString("utf8")) as {
+      payload?: { transaction?: unknown };
+    };
+    const wire = envelope?.payload?.transaction;
+    if (typeof wire !== "string" || wire.length === 0) return null;
+    const bytes = Buffer.from(wire, "base64");
+    let offset = 0;
+    let count = 0;
+    let shift = 0;
+    while (offset < bytes.length && shift <= 28) {
+      const byte = bytes[offset];
+      if (byte === undefined) return null;
+      offset += 1;
+      count |= (byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) break;
+      shift += 7;
+    }
+    if (count < 1 || offset + 64 > bytes.length) return null;
+    return base58.encode(bytes.subarray(offset, offset + 64));
   } catch {
     return null;
   }

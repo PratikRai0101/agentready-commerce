@@ -22,11 +22,15 @@ if (files.length === 0) {
   process.exit(0);
 }
 
-const pool = new pg.Pool({ connectionString: databaseUrl, max: 1, ssl: /sslmode=(require|verify-full|verify-ca)/.test(databaseUrl) ? { rejectUnauthorized: true } : undefined });
+const pool = new pg.Pool({
+  connectionString: databaseUrl,
+  max: 1,
+  ssl: { rejectUnauthorized: true },
+});
 const client = await pool.connect();
 try {
-  await client.query("SELECT pg_advisory_xact_lock(hashtext('x402_settlement_migrations'))");
   await client.query("BEGIN");
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('x402_settlement_migrations'))");
   await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   const applied = new Set((await client.query("SELECT filename FROM schema_migrations")).rows.map((r) => r.filename));
   for (const file of files) {

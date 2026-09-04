@@ -1,4 +1,4 @@
-import type { SettlementStore, StoredAttempt } from "./x402-settlement-store";
+import type { ReleaseEvidence, SettlementStore, StoredAttempt } from "./x402-settlement-store";
 
 /**
  * Operator CLI core (pure, offline-testable). No request handler may import
@@ -12,7 +12,7 @@ export type ReleaseArgs = {
   newApprovalEventId: string;
   /** Optional override; defaults to the row's staged blockhash (must match). */
   blockhash?: string;
-  transferVerification: string;
+  transferVerification: ReleaseEvidence["transferVerification"];
   note: string;
 };
 
@@ -31,6 +31,9 @@ export function parseReleaseArgs(argv: string[]): { ok: boolean; args?: ReleaseA
   if (!operatorId) return { ok: false, error: "--operator <operator-id> is required" };
   if (!newApprovalEventId) return { ok: false, error: "--new-approval <appr_...> is required" };
   if (!transferVerification) return { ok: false, error: "--transfer <verification-state> is required" };
+  if (transferVerification !== "mismatch" && transferVerification !== "unavailable") {
+    return { ok: false, error: "--transfer must be mismatch or unavailable; verified transfers must be reconciled" };
+  }
   if (!note) return { ok: false, error: "--note <text> is required" };
   return { ok: true, args: { operationId, operatorId, newApprovalEventId, blockhash, transferVerification, note } };
 }

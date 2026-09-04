@@ -8,6 +8,7 @@
 import pg from "pg";
 import { parseReleaseArgs, parseReconcileSettledArgs, persistReconciledSettlement, resolveReleaseBlockhash, validateReconcileSettledEvidence, OPERATOR_USAGE } from "./src/operator.ts";
 import { PostgresSettlementStore, pgTransactable, parseEncryptionKey } from "./src/x402-settlement-store.ts";
+import { extractTransactionSignature } from "./src/x402.ts";
 
 // Canonical devnet constants (mirrors packages/payments/src/x402-config.ts and
 // src/devnet-machine.ts, which cannot be imported here: that module graph uses
@@ -59,8 +60,9 @@ async function fetchFinalizedTransaction(rpcUrl, signature, timeoutMs = 30000) {
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) return null;
+  if (!response.ok) throw new Error(`RPC returned HTTP ${response.status}`);
   const data = await response.json();
+  if (data?.error) throw new Error("RPC rejected the transaction inspection request");
   return data?.result ?? null;
 }
 
@@ -243,6 +245,7 @@ try {
       verificationResult: "verified",
       settlementResult: "reconciled",
       requestDigest: row.requestDigest,
+      checkedSlot: verdict.slot,
       timestamp: new Date().toISOString(),
       explorerUrl: `https://explorer.solana.com/tx/${parsed.args.txHash}?cluster=devnet`,
       memoVerification: "verified",
@@ -284,6 +287,38 @@ try {
     console.error(`error: ${resolved.error}`);
     process.exit(1);
   }
+
+  // Blockhash expiry alone does not prove that the signed transaction never
+  // landed. Derive the signature from the stored wire payload and refuse the
+  // release if finalized RPC can see any transaction for it. A missing or
+  // unreadable payload is also a refusal, never an invitation to retry.
+  if (row.txHash) {
+    console.error("error: attempt already has a transaction signature; reconcile it instead of releasing");
+    process.exit(1);
+  }
+  let signedTransactionSignature;
+  try {
+    const storedPayload = row.signedPayloadEnc ? store.decryptSignedPayload(row.signedPayloadEnc) : "";
+    signedTransactionSignature = extractTransactionSignature(storedPayload);
+  } catch {
+    signedTransactionSignature = null;
+  }
+  if (!signedTransactionSignature) {
+    console.error("error: stored signed transaction signature is unavailable; release refused");
+    process.exit(1);
+  }
+  let existingTransaction;
+  try {
+    existingTransaction = await fetchFinalizedTransaction(rpcUrl, signedTransactionSignature);
+  } catch {
+    console.error("error: finalized transaction inspection failed; release refused");
+    process.exit(1);
+  }
+  if (existingTransaction !== null) {
+    console.error("error: signed transaction is present on-chain; reconcile or manually resolve it, release refused");
+    process.exit(1);
+  }
+
   const verdict = await fetchBlockhashValidity(rpcUrl, resolved.blockhash);
   if (!verdict.expired) {
     console.error(`error: blockhash still valid or unverifiable (slot=${verdict.slot}); release refused.`);

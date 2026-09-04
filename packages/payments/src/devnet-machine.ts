@@ -924,6 +924,38 @@ export class DevnetMachineResource {
             headers: {},
           };
         }
+
+        // Reconciliation writes must also hold a fresh fence. Never inspect
+        // and then transition an awaiting row with null ownership.
+        let reconciliationOwner = row.leaseOwner;
+        let reconciliationFence = row.fenceToken;
+        const leased = row.leaseExpiresAt ? Date.parse(row.leaseExpiresAt) > Date.now() : false;
+        if (!leased) {
+          const taken = await this.store.claimRowForTakeover(
+            row.operationId,
+            `reconcile-${randomUUID()}`,
+            leaseTtlMsFromEnv(),
+          );
+          if (!taken) {
+            const current = await this.store.getByOperationId(row.operationId);
+            if (current && current.status !== "awaiting_evidence") return this.joinStoredRow(current);
+            return {
+              status: 202,
+              body: { error: "settlement_in_progress", detail: "Another worker claimed this attempt; retry to reconcile the original.", paymentIdentifier, requestDigest, reconciliationState: "pending", retryable: true },
+              headers: {},
+            };
+          }
+          reconciliationOwner = taken.leaseOwner;
+          reconciliationFence = taken.fenceToken;
+        }
+        if (!reconciliationOwner || !reconciliationFence) {
+          return {
+            status: 202,
+            body: { error: "settlement_ambiguous", detail: "The original attempt has no valid reconciliation fence; retry after operator recovery.", paymentIdentifier, requestDigest, reconciliationState: "pending", retryable: true },
+            headers: {},
+          };
+        }
+
         const inspection = await this.inspectTransaction(row.txHash, this.expectedMemoFor(row), {
           asset: this.config.devnetUsdcMint,
           amount: this.getCanonicalRequirements(requestDigest).amount,
@@ -933,7 +965,7 @@ export class DevnetMachineResource {
         if (inspection.memoVerification === "verified" && inspection.transferVerification === "verified") {
           const canonicalAmount = this.getCanonicalRequirements(requestDigest).amount;
           const evidencePayer = knownPayer;
-          return await this.completeSettlement(row.operationId, null, null, {
+          return await this.completeSettlement(row.operationId, reconciliationOwner, reconciliationFence, {
             success: true,
             transactionHash: row.txHash,
             payer: evidencePayer,
@@ -943,13 +975,22 @@ export class DevnetMachineResource {
             amount: canonicalAmount,
             facilitatorUrl: this.config.facilitatorUrl,
             paymentIdentifier,
-          }, "reconciled",
-          { asset: this.config.devnetUsdcMint, amount: canonicalAmount, payee: this.config.payeePublicKey, payer: evidencePayer },
-          requestDigest, paymentIdentifier, String(evidence.feePayer ?? ""),
-          inspection);
+            }, "reconciled",
+           { asset: this.config.devnetUsdcMint, amount: canonicalAmount, payee: this.config.payeePublicKey, payer: evidencePayer },
+           requestDigest, paymentIdentifier, String(evidence.feePayer ?? ""),
+           inspection);
         }
         if (inspection.memoVerification === "missing" || inspection.transferVerification === "mismatch") {
-          await this.store.transition(row.operationId, ["awaiting_evidence"], "mismatch", {}, null, null, "join-inspect-mismatch", inspection.reason ?? "Confirmed transaction does not match.");
+          await this.store.transition(
+            row.operationId,
+            ["awaiting_evidence"],
+            "mismatch",
+            {},
+            reconciliationOwner,
+            reconciliationFence,
+            "join-inspect-mismatch",
+            inspection.reason ?? "Confirmed transaction does not match.",
+          );
           return {
             status: 502,
             body: { error: "settlement_transaction_mismatch", detail: inspection.reason ?? "The confirmed transaction does not match the expected payment.", paymentIdentifier, requestDigest, reconciliationState: "manual_reconciliation_required", retryable: false },

@@ -24,6 +24,7 @@ export {
   adaptSettlement,
   memoVerificationLabel,
   extractTransactionBlockhash,
+  extractTransactionSignature,
   checkBlockhashExpired,
 } from "./x402";
 export type { BlockhashValidity } from "./x402";
