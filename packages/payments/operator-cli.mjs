@@ -6,9 +6,9 @@
 // - reconcile-settled: persists an already-finalized signature (read-only RPC
 //   inspection) with a settling/awaiting_evidence→settled transition only.
 import pg from "pg";
+import { base58 } from "@scure/base";
 import { parseReleaseArgs, parseReconcileSettledArgs, persistReconciledSettlement, resolveReleaseBlockhash, validateReconcileSettledEvidence, OPERATOR_USAGE } from "./src/operator.ts";
 import { PostgresSettlementStore, pgTransactable, parseEncryptionKey } from "./src/x402-settlement-store.ts";
-import { extractTransactionSignature } from "./src/x402.ts";
 
 // Canonical devnet constants (mirrors packages/payments/src/x402-config.ts and
 // src/devnet-machine.ts, which cannot be imported here: that module graph uses
@@ -22,6 +22,31 @@ const TOKEN_PROGRAM_IDS = new Set([
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1sT3L4f5Y7W8X9Y",
 ]);
+
+// Plain-node copy of the signed-wire signature decoder. Keep this local: the
+// shared x402 module contains TypeScript parameter properties that Node's
+// strip-only loader cannot execute in this no-build operator entry point.
+function extractTransactionSignature(encodedPayment) {
+  try {
+    const envelope = JSON.parse(Buffer.from(encodedPayment, "base64url").toString("utf8"));
+    const wire = envelope?.payload?.transaction;
+    if (typeof wire !== "string" || wire.length === 0) return null;
+    const bytes = Buffer.from(wire, "base64");
+    let offset = 0;
+    let count = 0;
+    let shift = 0;
+    while (offset < bytes.length && shift <= 28) {
+      const byte = bytes[offset++];
+      count |= (byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) break;
+      shift += 7;
+    }
+    if (count < 1 || offset + 64 > bytes.length) return null;
+    return base58.encode(bytes.subarray(offset, offset + 64));
+  } catch {
+    return null;
+  }
+}
 
 // Minimal inline isBlockhashValid read. Mirrors checkBlockhashExpired() in
 // src/x402.ts, which cannot be imported here: that module uses TypeScript
