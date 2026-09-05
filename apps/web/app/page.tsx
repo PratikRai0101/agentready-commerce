@@ -99,6 +99,7 @@ export default function HomePage() {
   });
   const [timeline, setTimeline] = useState<AuditEvent[]>([]);
   const [paymentIds, setPaymentIds] = useState<{ orderId?: string; paymentId?: string; signature?: string } | null>(null);
+  const [x402Order, setX402Order] = useState<X402OrderInfo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
@@ -141,6 +142,7 @@ export default function HomePage() {
     setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
+    setX402Order(null);
     setIntent([]);
     setIntentVersion(0);
     const response = await fetch("/api/session", { method: "POST" });
@@ -569,6 +571,56 @@ export default function HomePage() {
     setBusy(false);
   }, [orderId, pushAgent, verifyPayment]);
 
+  const prepareX402Order = useCallback(async () => {
+    if (!orderId) return;
+    setBusy(true);
+    const response = await fetch("/api/pay/x402-order/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId }),
+    });
+    const data = await response.json();
+    setOrderState(data.state);
+    if (data.ok && data.payment) {
+      setX402Order(data.payment);
+      pushAgent(`Agent Pay prepared: ${data.payment.paymentIdentifier} for ${(data.payment.amountMinor / 100).toFixed(2)} ${data.payment.currency} (Solana Devnet simulation — no funds moved). Settling automatically.`);
+    } else {
+      pushAgent(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
+      setNotice(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
+    }
+    void refreshTimeline(orderId);
+    setBusy(false);
+  }, [orderId, pushAgent, refreshTimeline]);
+
+  const confirmX402Order = useCallback(async (paymentIdentifier: string) => {
+    if (!orderId) return;
+    setBusy(true);
+    const response = await fetch("/api/pay/x402-order/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId, paymentIdentifier }),
+    });
+    const data = await response.json();
+    setOrderState(data.state);
+    if (data.ok && data.payment) {
+      setX402Order(data.payment);
+      pushAgent(`Agent Pay verified. Order is now PAID_VERIFIED — fulfilment may begin.`);
+    } else {
+      pushAgent(`Agent Pay confirmation failed: ${data.error}`);
+      setNotice(`Agent Pay confirmation failed: ${data.error ?? "unknown error"}`);
+    }
+    void refreshTimeline(orderId);
+    setBusy(false);
+  }, [orderId, pushAgent, refreshTimeline]);
+
+  // A rail selection is bound to the approved envelope: a new quote, a lost
+  // approval, or a changed digest clears the pending Agent Pay preparation.
+  useEffect(() => {
+    if (!quote?.approvalEventId || (x402Order && quote && x402Order.envelopeDigest !== quote.digest)) {
+      setX402Order((prev) => (prev && prev.status === "verified" && quote?.approvalEventId ? prev : null));
+    }
+  }, [quote, x402Order]);
+
   const fulfil = useCallback(
     async (fail: boolean) => {
       if (!orderId) return;
@@ -618,6 +670,7 @@ export default function HomePage() {
     setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
+    setX402Order(null);
     setNotice(null);
     setIntent([]);
     pushAgent("Server state reset. Fresh conversation started.");
@@ -635,6 +688,7 @@ export default function HomePage() {
     setMachineSpend(null);
     setQuote(null);
     setPaymentIds(null);
+    setX402Order(null);
     setRecommendationBinding(null);
     setIntent([]);
     const response = await fetch("/api/scenario");
@@ -828,8 +882,14 @@ export default function HomePage() {
                 paymentIds={paymentIds}
                 isMock={isMock}
                 busy={busy}
+                approvedDigest={quote.digest}
+                totalLabel={`₹${(quote.envelope.totalMinor / 100).toFixed(2)} ${quote.envelope.currency}`}
+                x402Available={isMock}
+                x402Order={x402Order}
                 onInitiate={initiate}
                 onMockCapture={mockCapture}
+                onPrepareX402={prepareX402Order}
+                onConfirmX402={confirmX402Order}
                 onFulfil={() => fulfil(false)}
                 onCompensate={compensate}
               />
@@ -993,13 +1053,32 @@ function ApprovalPanel({
 
 /* ─── Payment Controls ─── */
 
+type X402OrderInfo = {
+  paymentIdentifier: string;
+  requestDigest: string;
+  envelopeDigest: string;
+  network: string;
+  asset: string;
+  amountMinor: number;
+  currency: string;
+  recipient: string;
+  mockTxHash?: string | null;
+  status: "pending" | "verified";
+};
+
 function PaymentControls({
   orderState,
   paymentIds,
   isMock,
   busy,
+  approvedDigest,
+  totalLabel,
+  x402Available,
+  x402Order,
   onInitiate,
   onMockCapture,
+  onPrepareX402,
+  onConfirmX402,
   onFulfil,
   onCompensate,
 }: {
@@ -1007,40 +1086,105 @@ function PaymentControls({
   paymentIds: { orderId?: string; paymentId?: string; signature?: string } | null;
   isMock: boolean;
   busy: boolean;
+  approvedDigest: string | null;
+  totalLabel: string;
+  x402Available: boolean;
+  x402Order: X402OrderInfo | null;
   onInitiate: () => void;
   onMockCapture: () => void;
+  onPrepareX402: () => void;
+  onConfirmX402: (paymentIdentifier: string) => void;
   onFulfil: () => void;
   onCompensate: () => void;
 }) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [rail, setRail] = useState<"razorpay" | "x402" | null>(null);
+  const [boundDigest, setBoundDigest] = useState<string | null>(null);
+  const autoSettledRef = useRef<string | null>(null);
+
+  const paid = ["PAID_VERIFIED", "FULFILMENT_PENDING", "FULFILLED", "FULFILMENT_FAILED", "COMPENSATION_PENDING", "REFUNDED"].includes(orderState);
+  useEffect(() => {
+    if (paid) setModalOpen(false);
+  }, [paid]);
+  const selectionStale = rail !== null && (approvedDigest === null || boundDigest !== approvedDigest);
+  const razorpayStarted = Boolean(paymentIds?.orderId);
+  const x402Verified = x402Order?.status === "verified";
+  const x402PendingCurrent = x402Order?.status === "pending" && x402Order.envelopeDigest === approvedDigest;
+
+  // Rail selection is the single human decision: once the x402 mock order is
+  // prepared, the 402 → signed payment → retry → verification → settlement
+  // simulation runs automatically. No second approval is requested.
+  useEffect(() => {
+    if (rail === "x402" && !selectionStale && x402PendingCurrent && !busy && autoSettledRef.current !== x402Order!.paymentIdentifier) {
+      autoSettledRef.current = x402Order!.paymentIdentifier;
+      onConfirmX402(x402Order!.paymentIdentifier);
+    }
+  }, [rail, selectionStale, x402PendingCurrent, busy, x402Order, onConfirmX402]);
+
+  const chooseRail = (next: "razorpay" | "x402") => {
+    setRail(next);
+    setBoundDigest(approvedDigest);
+    if (next === "razorpay" && !razorpayStarted) {
+      // The checkout panel renders inline, so the modal can close.
+      setModalOpen(false);
+      onInitiate();
+    }
+    if (next === "x402" && !x402Order) onPrepareX402();
+  };
+
   return (
     <div className="demo-panel">
       <h3>Payment</h3>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-        {!paymentIds?.orderId && (
-          <button className="demo-btn primary" type="button" onClick={onInitiate} disabled={busy}>
-            Pay with Razorpay
+      {!razorpayStarted && !x402Verified && !paid && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <button className="demo-btn primary" type="button" onClick={() => { setRail(null); setBoundDigest(null); setModalOpen(true); }} disabled={busy || !approvedDigest}>
+            Choose payment method
           </button>
-        )}
-        {paymentIds?.orderId && isMock && !paymentIds.paymentId && (
-          <button className="demo-btn primary" type="button" onClick={onMockCapture} disabled={busy}>
-            Complete test payment
-          </button>
-        )}
-        {paymentIds?.orderId && !isMock && !paymentIds.paymentId && (
-          <button className="demo-btn primary" type="button" onClick={onInitiate} disabled={busy}>
-            Reopen Razorpay Checkout
-          </button>
-        )}
-      </div>
-      {paymentIds?.orderId && (
-        <div style={{ fontSize: 12, color: "var(--text-soft)" }}>
-          Order: <span style={{ fontFamily: "var(--mono)" }}>{maskId(paymentIds.orderId)}</span>
-          {paymentIds.paymentId && (
-            <> &middot; payment: <span style={{ fontFamily: "var(--mono)" }}>{maskId(paymentIds.paymentId)}</span></>
-          )}
-          {paymentIds.signature && <> &middot; signature verified</>}
         </div>
       )}
+      {x402Verified && x402Order && (
+        <div style={{ fontSize: 12, color: "var(--good)", marginBottom: 8 }}>
+          Agent Pay verified — <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.paymentIdentifier)}</span>
+          {" · "}Solana Devnet simulation — no funds moved.
+          {x402Order.mockTxHash && (
+            <> &middot; ref: <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.mockTxHash)}</span></>
+          )}
+        </div>
+      )}
+      {paymentIds?.orderId ? (
+        <div className="demo-panel" style={{ borderLeftColor: "var(--accent)", borderLeftWidth: 3, marginBottom: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 6 }}>
+            <strong style={{ fontSize: 13 }}>Razorpay Checkout</strong>
+            <span className="prov-mode mock">MOCK · TEST DEMO</span>
+            <span style={{ fontSize: 11, color: "var(--text-soft)" }}>Test Mode style — no real card needed</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+            {["UPI", "Card", "Netbanking"].map((m) => (
+              <span key={m} className="chip preference" style={{ cursor: "default" }}>{m}</span>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-soft)", marginBottom: 8 }}>
+            Order: <span style={{ fontFamily: "var(--mono)" }}>{maskId(paymentIds.orderId!)}</span>
+            {" · "}Total: {totalLabel}
+            {paymentIds.paymentId && (
+              <> &middot; payment: <span style={{ fontFamily: "var(--mono)" }}>{maskId(paymentIds.paymentId)}</span></>
+            )}
+            {paymentIds.signature && <> &middot; signature verified</>}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {isMock && !paymentIds.paymentId && (
+              <button className="demo-btn primary" type="button" onClick={onMockCapture} disabled={busy}>
+                Complete test payment
+              </button>
+            )}
+            {!isMock && !paymentIds.paymentId && (
+              <button className="demo-btn primary" type="button" onClick={onInitiate} disabled={busy}>
+                Reopen Razorpay Checkout
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
       {(orderState === "PAID_VERIFIED" || orderState === "FULFILMENT_PENDING") && (
         <div style={{ marginTop: 8 }}>
           <button className="demo-btn primary" type="button" onClick={onFulfil} disabled={busy}>Fulfil order</button>
@@ -1049,6 +1193,110 @@ function PaymentControls({
       {(orderState === "FULFILMENT_FAILED" || orderState === "COMPENSATION_PENDING") && (
         <div style={{ marginTop: 8 }}>
           <button className="demo-btn primary" type="button" onClick={onCompensate} disabled={busy}>Start refund</button>
+        </div>
+      )}
+
+      {modalOpen && !paid && (
+        <div className="drawer-scrim open" onClick={() => setModalOpen(false)} aria-hidden="true" />
+      )}
+      {modalOpen && !paid && (
+        <div className="drawer open" role="dialog" aria-modal="true" aria-labelledby="rail-title" tabIndex={-1} style={{ maxWidth: 560, margin: "8vh auto", maxHeight: "84vh" }}>
+          <div className="drawer-head">
+            <h2 id="rail-title">Choose payment method</h2>
+            <button className="drawer-close" type="button" onClick={() => setModalOpen(false)} aria-label="Close payment methods">&times;</button>
+          </div>
+          <div className="drawer-body">
+            <p style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 0 }}>
+              Exactly one rail will settle this order. Bound to approved envelope{" "}
+              <code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{approvedDigest ? `${approvedDigest.slice(0, 12)}…` : "—"}</code>.
+              If the envelope changes, choose again after re-approval.
+            </p>
+            {selectionStale && (
+              <div style={{ padding: 10, background: "var(--warn-soft)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--warn)", marginBottom: 10 }}>
+                The envelope changed since this selection. Approve the exact envelope again, then choose a method.
+              </div>
+            )}
+            {rail === null && (
+              <div style={{ display: "grid", gap: 10 }}>
+                <button
+                  type="button" className="demo-panel" style={{ textAlign: "left", cursor: "pointer", borderLeftColor: "var(--accent)", borderLeftWidth: 3 }}
+                  onClick={() => chooseRail("razorpay")} disabled={busy || x402Verified || x402PendingCurrent}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                    <strong style={{ fontSize: 14 }}>Razorpay Checkout</strong>
+                    <span className="prov-mode mock">MOCK · TEST DEMO</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>
+                    UPI, cards and net banking through the mock adapter. {totalLabel} · IDs like `order_MOCK_*` — no funds move.
+                    {x402PendingCurrent ? " Finish or abandon the pending Agent Pay first." : ""}
+                  </div>
+                </button>
+                {x402Available ? (
+                  <button
+                    type="button" className="demo-panel" style={{ textAlign: "left", cursor: "pointer", borderLeftColor: "var(--accent)", borderLeftWidth: 3 }}
+                    onClick={() => chooseRail("x402")} disabled={busy || razorpayStarted}
+                  >
+                    <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                      <strong style={{ fontSize: 14 }}>Agent Pay with x402</strong>
+                      <span className="prov-mode mock">Solana Devnet simulation — no funds moved.</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>
+                      {x402PendingCurrent
+                        ? `Settling ${maskId(x402Order!.paymentIdentifier)} automatically — no second approval.`
+                        : "Shows network, asset, exact amount, recipient and digests, then settles the mock automatically."}
+                    </div>
+                  </button>
+                ) : (
+                  <div className="demo-panel" style={{ fontSize: 12, color: "var(--text-soft)" }}>
+                    Agent Pay simulation is available on the mock host only.
+                  </div>
+                )}
+              </div>
+            )}
+            {rail === "razorpay" && !selectionStale && (
+              <div>
+                <p style={{ fontSize: 12, color: "var(--text-soft)" }}>
+                  Razorpay Checkout opens next{razorpayStarted ? " (order already created below)" : ""}. Complete the mock
+                  capture to settle — or go back to use the other rail before anything settles.
+                </p>
+                <button className="demo-btn" type="button" onClick={() => setRail(null)} disabled={busy}>Back to methods</button>
+              </div>
+            )}
+            {rail === "x402" && !selectionStale && (
+              <div>
+                {!x402Order || x402Order.envelopeDigest !== approvedDigest ? (
+                  <p style={{ fontSize: 12, color: "var(--text-soft)" }}>Preparing the mock order payment…</p>
+                ) : (
+                  <div>
+                    <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "4px 10px", fontSize: 12, marginBottom: 10 }}>
+                      <span style={{ color: "var(--text-soft)" }}>Network</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.network}</span>
+                      <span style={{ color: "var(--text-soft)" }}>Asset</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.asset} (mock USDC)</span>
+                      <span style={{ color: "var(--text-soft)" }}>Exact amount</span><span>₹{(x402Order.amountMinor / 100).toFixed(2)} {x402Order.currency} (mirrors approved envelope total)</span>
+                      <span style={{ color: "var(--text-soft)" }}>Recipient</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.recipient}</span>
+                      <span style={{ color: "var(--text-soft)" }}>Request digest</span><code style={{ fontFamily: "var(--mono)", fontSize: 11, overflowWrap: "anywhere" }}>{x402Order.requestDigest}</code>
+                      <span style={{ color: "var(--text-soft)" }}>Payment ID</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{x402Order.paymentIdentifier}</code>
+                      <span style={{ color: "var(--text-soft)" }}>Envelope</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{`${x402Order.envelopeDigest.slice(0, 12)}…`} (approved)</code>
+                    </div>
+                    <ol style={{ fontSize: 12, color: "var(--text-soft)", margin: "0 0 10px 18px", padding: 0 }}>
+                      {(x402Order.status === "verified"
+                        ? ["402 PAYMENT-REQUIRED", "Signed mock payment", "Retry with signature", "Verification", "Mock settlement"]
+                        : ["402 PAYMENT-REQUIRED", "Signed mock payment", "Retry with signature"]
+                      ).map((step) => (
+                        <li key={step}>✓ {step}</li>
+                      ))}
+                      {x402Order.status !== "verified" && <li>Settling mock payment…</li>}
+                    </ol>
+                    <p style={{ fontSize: 12, color: "var(--text-soft)" }}>
+                      Solana Devnet simulation — no funds moved. No second approval was requested.
+                    </p>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button className="demo-btn" type="button" onClick={() => setRail(null)} disabled={busy}>Back to methods</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1274,10 +1522,10 @@ function TrustDrawer({
                       >
                         {maskId(machineSpend.txHash)}
                       </a>
-                      &middot; {machineSpend.mock ? "x402 MOCK — no funds moved" : "x402 SOLANA DEVNET — test tokens, no real money"}
-                    </div>
-                  </div>
-                )}
+                        &middot; {machineSpend.mock ? "x402 MOCK — no funds moved" : "x402 SOLANA DEVNET — test tokens, no real money"}
+          </div>
+        </div>
+      )}
 
                 {/* Full audit with raw data */}
                 {timeline.map((event) => (

@@ -277,6 +277,49 @@ export function canonicalToolSpendRequestDigest(req: ToolSpendRequest): string {
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
+/**
+ * Mock order-payment request for the checkout rail selector.
+ *
+ * This is a simulation shown in the storefront behind an explicit
+ * "Solana Devnet simulation, no funds moved" label. It reuses the canonical
+ * digest pattern above but binds to the approved Commerce Envelope hash —
+ * never to the real Devnet fit-score settlement, which must not be presented
+ * as an order payment. No wallet, facilitator, or chain call is involved.
+ */
+export const X402_MOCK_ORDER_NETWORK = SOLANA_DEVNET_CAIP2;
+export const X402_MOCK_ORDER_ASSET = "usdc_devnet_mock_mint";
+export const X402_MOCK_ORDER_PAYEE = "demo_payee_RunVista_mock";
+export const X402_MOCK_ORDER_PURPOSE = "order_payment";
+
+export type OrderPaymentRequest = {
+  logicalOrderId: string;
+  envelopeDigest: string;
+  network: string;
+  asset: string;
+  amountMinor: number;
+  currency: string;
+  payee: string;
+  purpose: typeof X402_MOCK_ORDER_PURPOSE;
+};
+
+export function canonicalOrderPaymentRequestDigest(req: OrderPaymentRequest): string {
+  const canonical = JSON.stringify({
+    logicalOrderId: req.logicalOrderId,
+    envelopeDigest: req.envelopeDigest,
+    network: req.network,
+    asset: req.asset,
+    amountMinor: req.amountMinor,
+    currency: req.currency,
+    payee: req.payee,
+    purpose: req.purpose,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function mockOrderPaymentIdentifier(requestDigest: string): string {
+  return `x402ord_${requestDigest.slice(0, 12)}`;
+}
+
 export type CanonicalPaymentRequirements = {
   scheme: "exact";
   network: string;

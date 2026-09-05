@@ -2,9 +2,11 @@
 //
 // Covers the current Two-column shop flow after the Decision Ledger split:
 // ambiguous request → shortlist → select → approve → budget-edit
-// invalidation (approval reset + audit preserved) → re-approve → mocked
-// initiation (PAYMENT_PENDING) → mocked completion (payment verified) →
-// fulfil via UI (FULFILLED receipt with total + verified payment id).
+// invalidation (approval reset + audit preserved) → re-approve → rail
+// selector modal → Razorpay mocked initiation (PAYMENT_PENDING) → mocked
+// completion (payment verified) → fulfil via UI (FULFILLED receipt with
+// total + verified payment id) → fresh session → Agent Pay mock order
+// payment (prepare detail → confirm → PAID_VERIFIED, one rail only).
 //
 // MOCKS ONLY. No real payment: run the app with empty Razorpay credentials so
 // the mock adapter serves /api/pay/* locally, and this script aborts any
@@ -173,9 +175,9 @@ async function runViewport(label, viewport) {
   const reviewVisible = (await page.locator('text=Order review').count()) > 0;
   check(`${label}: quote prepared (order review visible)`, reviewVisible, '');
   const approved1 = await approveNow(page);
-  const payBtn = page.locator('button:has-text("Pay with Razorpay")').first();
-  const payVisible = (await payBtn.count()) > 0 && (await payBtn.isVisible().catch(() => false));
-  check(`${label}: approve binds envelope (pay offered)`, approved1 && payVisible, '');
+  const chooseBtn = page.locator('button:has-text("Choose payment method")').first();
+  const chooseVisible = (await chooseBtn.count()) > 0 && (await chooseBtn.isVisible().catch(() => false));
+  check(`${label}: approve binds envelope (rail choice offered)`, approved1 && chooseVisible, '');
   const timeline1 = oid ? await fetchTimeline(page, oid) : [];
   check(
     `${label}: audit records approval`,
@@ -201,14 +203,16 @@ async function runViewport(label, viewport) {
     `events ${timeline1.length}→${timeline2.length}`,
   );
 
-  // Re-approve and initiate mocked payment.
+  // Re-approve and choose the Razorpay rail from the modal.
   await selectFirstProduct(page);
   const approved2 = await approveNow(page);
   check(`${label}: re-approve updated order`, approved2, '');
-  const payBtn2 = page.locator('button:has-text("Pay with Razorpay")').first();
+  await page.locator('button:has-text("Choose payment method")').first().click();
+  await page.locator('#rail-title').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+  const razorpayCard = page.locator('button:has-text("Razorpay Checkout")').first();
   const [initiateResp] = await Promise.all([
     page.waitForResponse((r) => r.url().includes('/api/pay/initiate'), { timeout: 10000 }).catch(() => null),
-    payBtn2.click(),
+    razorpayCard.click(),
   ]);
   try {
     mockOrderId = (await initiateResp?.json())?.attempt?.externalOrderId || '';
@@ -268,6 +272,64 @@ async function runViewport(label, viewport) {
 
   check(`${label}: mock ids only`, mockOrderId.startsWith('order_MOCK_') && mockPaymentId.startsWith('pay_MOCK_'), `${mockOrderId} ${mockPaymentId}`);
   check(`${label}: no real Razorpay/external egress`, blockedExternal.length === 0, blockedExternal.length ? blockedExternal.slice(0, 3).join(', ') : '0 external calls');
+
+  // Fresh session: Agent Pay mock order payment through the rail modal.
+  const reloadSessionPromise = page
+    .waitForResponse((r) => r.url().includes('/api/session') && r.request().method() === 'POST', { timeout: 20000 })
+    .catch(() => null);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const reloadSessionResp = await reloadSessionPromise;
+  let oid2 = null;
+  try {
+    oid2 = (await reloadSessionResp?.json())?.orderId || null;
+  } catch {}
+  await page.locator('.composer-input').waitFor({ state: 'visible', timeout: 20000 });
+  check(`${label}: x402 flow starts a fresh session`, !!oid2, oid2 || 'no orderId');
+  await sendMessage(page, 'I need black shoes under ₹5,000.');
+  await sendMessage(page, 'UK 9');
+  await sendMessage(page, 'road running');
+  await page.locator('.product-card').first().waitFor({ state: 'visible', timeout: 20000 });
+  await selectFirstProduct(page);
+  const approvedX = await approveNow(page);
+  check(`${label}: x402 flow approved`, approvedX, '');
+  await page.locator('button:has-text("Choose payment method")').first().click();
+  await page.locator('#rail-title').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+  const x402Card = page.locator('button:has-text("Agent Pay with x402")').first();
+  check(`${label}: rail modal offers Agent Pay`, (await x402Card.count()) > 0, '');
+  const [prepareResp] = await Promise.all([
+    page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/prepare'), { timeout: 10000 }).catch(() => null),
+    x402Card.click(),
+  ]);
+  let x402Id = '';
+  try {
+    x402Id = (await prepareResp?.json())?.payment?.paymentIdentifier || '';
+  } catch {}
+  // Read before auto-settlement closes the modal.
+  const detailText = (((await page.locator('.drawer.open').first().textContent().catch(() => '')) || '').replace(/\s+/g, ' ')).trim();
+  check(
+    `${label}: x402 detail discloses terms before confirm`,
+    x402Id.startsWith('x402ord_') && /Network/.test(detailText) && /Exact amount/.test(detailText) && /no funds moved/i.test(detailText),
+    `${x402Id} ${detailText.slice(0, 80)}`,
+  );
+  // Rail selection auto-settles: no second approval click.
+  const confirmBtn = page.locator('button:has-text("Confirm mock payment")').first();
+  check(`${label}: x402 needs no second approval click`, (await confirmBtn.count()) === 0, '');
+  const confirmResp = await page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/confirm'), { timeout: 10000 }).catch(() => null);
+  try {
+    await confirmResp?.json();
+  } catch {}
+  await page.waitForTimeout(800);
+  const fulfilX = page.locator('button:has-text("Fulfil order")').first();
+  const fulfilXReady = (await fulfilX.count()) > 0 && (await fulfilX.isVisible().catch(() => false));
+  check(`${label}: x402 mock confirm reaches PAID_VERIFIED`, fulfilXReady, '');
+  const timelineX = oid2 ? await fetchTimeline(page, oid2) : [];
+  check(
+    `${label}: audit records x402 selection + verification`,
+    timelineX.some((e) => e.type === 'x402_order.prepared') && timelineX.some((e) => e.type === 'x402_order.verified'),
+    `events=${timelineX.length}`,
+  );
+  check(`${label}: x402 mock id only`, x402Id.startsWith('x402ord_'), x402Id);
+  check(`${label}: still zero external egress`, blockedExternal.length === 0, blockedExternal.length ? blockedExternal.slice(0, 3).join(', ') : '0 external calls');
 
   await context.close();
   await browser.close();

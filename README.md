@@ -35,6 +35,24 @@ ambiguous request → clarification → ranked shortlist → exact envelope
 
 Negative paths are first-class demo scenes: price/variant tampering after approval, duplicate requests, replayed webhooks, forged signatures, and paid-but-unfulfillable orders (refund recovery).
 
+### Checkout rail selector
+
+After exact-envelope approval, “Choose payment method” opens one modal with two
+mutually exclusive cards, both bound to the approved envelope hash. If the
+envelope changes, the selection is invalidated and approval is required again.
+One logical order settles on at most one rail — enforced in the service layer,
+not just the UI:
+
+- **Razorpay Checkout** (`MOCK · TEST DEMO` on the public host): UPI, cards and
+  net banking through the mock adapter; `order_MOCK_*` / `pay_MOCK_*` IDs only.
+- **Agent Pay with x402** (`Solana Devnet simulation, no funds moved`): a mock
+  order payment showing network, asset, exact amount, recipient, request digest
+  and payment identifier before confirmation. It reuses the x402 canonical
+  digest pattern but never touches the real Devnet fit-score settlement, adds
+  no wallet or facilitator calls, and settles mock-only. A mock compensating
+  transfer (never a Razorpay refund, never a reversal) covers fulfilment
+  failure on this rail.
+
 ### x402/Solana machine rail
 
 The agent can purchase a premium fit-scoring resource through x402/Solana. Two modes:

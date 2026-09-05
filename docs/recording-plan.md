@@ -88,11 +88,16 @@
 
 - URL: same storefront tab (approval present).
 - Clicks:
-  1. Click “Pay with Razorpay” (`POST /api/pay/initiate`, rail
-     `razorpay_checkout`).
-  2. Click “Complete test payment” (`POST /api/pay/mock-capture` → verify).
+  1. Click “Choose payment method” — modal opens with two cards bound to the
+     approved envelope hash.
+  2. Razorpay path: click “Razorpay Checkout” (`POST /api/pay/initiate`, rail
+     `razorpay_checkout`) → checkout-styled panel shows `order_MOCK_*` + total
+     under “MOCK · TEST DEMO” → click “Complete test payment”
+     (`POST /api/pay/mock-capture` → verify).
   3. Show `order_MOCK_*` / `pay_MOCK_*` IDs + “signature verified”.
-- Capture: payment panel + drawer `payment.verified` event.
+  (Alternate take: choose “Agent Pay with x402”, review network/asset/amount/
+  recipient/digests as it settles automatically with no second approval.)
+- Capture: modal cards, payment panel + drawer `payment.verified` event.
 - Narration: pitch-script §2:30–3:10 first paragraph. Caption: “Mock order —
   no funds moved.”
 

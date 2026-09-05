@@ -24,6 +24,13 @@ import {
 import {
   buildDevnetToolSpendRequest,
   canonicalToolSpendRequestDigest,
+  canonicalOrderPaymentRequestDigest,
+  mockOrderPaymentIdentifier,
+  X402_MOCK_ORDER_NETWORK,
+  X402_MOCK_ORDER_ASSET,
+  X402_MOCK_ORDER_PAYEE,
+  X402_MOCK_ORDER_PURPOSE,
+  type OrderPaymentRequest,
   createAdapterRegistry,
   formatX402Amount,
   loadX402Config,
@@ -53,6 +60,21 @@ export type RecommendationBinding = {
   intentVersion: number;
   recommendationVersion: number;
   recommendationActionToken: string;
+};
+
+export type X402OrderPaymentStatus = "pending" | "verified";
+
+export type X402OrderPayment = {
+  paymentIdentifier: string;
+  requestDigest: string;
+  envelopeDigest: string;
+  network: string;
+  asset: string;
+  amountMinor: number;
+  currency: string;
+  recipient: string;
+  mockTxHash?: string;
+  status: X402OrderPaymentStatus;
 };
 
 export type MachineSpendAttemptStatus =
@@ -90,6 +112,7 @@ export type Session = {
   verification?: VerificationResult;
   compensation?: { refundId?: string; reason?: string; ok: boolean };
   machineSpendAttempt?: MachineSpendAttempt;
+  x402OrderPayment?: X402OrderPayment;
   machineSpend?: {
     paymentIdentifier: string;
     settlementHash: string;
@@ -136,6 +159,8 @@ export type AppServices = {
   buildQuote(orderId: string, productId: string, binding?: RecommendationBinding, operationId?: string): Promise<{ envelope: CommerceEnvelope; digest: string; signature: string; approvalEventId?: string; state: OrderState } & RecommendationBinding>;
   approve(orderId: string, digest: string, operationId?: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
   initiatePayment(orderId: string, rail: string, operationId?: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
+  prepareX402OrderPayment(orderId: string, operationId?: string): Promise<{ ok: boolean; payment?: X402OrderPayment; state: OrderState; error?: string; reasonCodes?: string[] }>;
+  confirmX402OrderPayment(orderId: string, paymentIdentifier: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; payment?: X402OrderPayment; error?: string; reasonCodes?: string[] }>;
   mockCapture(orderId: string): Promise<{ paymentId: string; signature: string; orderId: string }>;
   verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
   fulfil(orderId: string, fail: boolean, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
@@ -177,7 +202,7 @@ function buildMandate(customerId: string): PurchaseMandate {
     mandateId: newId("mdt"),
     customerId,
     allowedMerchantIds: [SHOE_CATALOG.merchantId],
-    allowedRails: ["razorpay_checkout"],
+    allowedRails: ["razorpay_checkout", "x402_solana"],
     maxAmountMinor: 1_000_000,
     expiresAt: new Date(Date.now() + MANDATE_EXPIRY_MS).toISOString(),
     humanConfirmationRequired: true,
@@ -748,7 +773,19 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       }
 
       if (session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
-        const r = { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected." };
+        const r = { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected.", reasonCodes: ["rail_single_success"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+
+      if (session.x402OrderPayment?.status === "verified") {
+        void audit.log({
+          logicalOrderId: orderId, type: "payment.rail_rejected", actor: "policy",
+          summary: "Razorpay initiation rejected: this order already settled via Agent Pay (x402 mock)",
+          externalReferences: { paymentIdentifier: session.x402OrderPayment.paymentIdentifier },
+          decision: "block", reasonCodes: ["rail_single_success"],
+        });
+        const r = { ok: false, state: session.state, error: "This order already settled via Agent Pay (x402 mock); Razorpay initiation is rejected.", reasonCodes: ["rail_single_success"] };
         if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
         return r;
       }
@@ -852,6 +889,9 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
     async mockCapture(orderId) {
       const session = sessions.get(orderId);
+      if (session?.x402OrderPayment?.status === "verified") {
+        throw new Error("Order already settled via Agent Pay (x402 mock); Razorpay capture is rejected.");
+      }
       if (!session || !session.externalOrderId) throw new Error("No initiated order");
       const paymentId = `pay_MOCK_${session.externalOrderId}_${Date.now()}`;
       const signature = razorpaySignature(razorpayKeySecret, `${session.externalOrderId}|${paymentId}`);
@@ -885,6 +925,23 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return r;
       }
 
+      if (session.verification?.verified) {
+        if (session.verification.rail === "razorpay_checkout" && externalOrderId === session.externalOrderId && externalPaymentId === session.externalPaymentId) {
+          const r = { ok: true, state: session.state };
+          if (operationId) coordinator.complete(operationId, "success", externalPaymentId, undefined, r);
+          return r;
+        }
+        void audit.log({
+          logicalOrderId: orderId, type: "payment.rail_rejected", actor: "policy",
+          summary: "Razorpay verification rejected: this order already settled on another rail",
+          externalReferences: { paymentId: externalPaymentId },
+          decision: "block", reasonCodes: ["rail_single_success"],
+        });
+        const r = { ok: false, state: session.state, error: "This order already settled on another rail; Razorpay verification is rejected." };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+
       if (externalOrderId !== session.externalOrderId) {
         void audit.log({
           logicalOrderId: orderId,
@@ -897,12 +954,6 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         setState(session, "PAYMENT_FAILED");
         const r = { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
         if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
-        return r;
-      }
-
-      if (session.verification?.verified) {
-        const r = { ok: true, state: session.state };
-        if (operationId) coordinator.complete(operationId, "success", externalPaymentId, undefined, r);
         return r;
       }
 
@@ -989,6 +1040,235 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         coordinator.complete(operationId, "success", externalPaymentId, undefined, verifyResult);
       }
       return verifyResult;
+    },
+
+    async prepareX402OrderPayment(orderId, operationId) {
+      return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "x402_order.prepare", { orderId }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; payment?: X402OrderPayment; state: OrderState; error?: string; reasonCodes?: string[] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
+      const session = sessions.get(orderId);
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
+      const record = envelopes.get(orderId);
+      if (!record) {
+        const r = { ok: false, state: session.state, error: "No envelope" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "No envelope", r);
+        return r;
+      }
+      if (!isMock) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay order payment is a mock simulation; unavailable outside mock mode",
+          decision: "block", reasonCodes: ["mock_only_rail"],
+        });
+        const r = { ok: false, state: session.state, error: "Agent Pay order payment is a mock simulation; unavailable outside mock mode", reasonCodes: ["mock_only_rail"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (session.verification?.verified || session.x402OrderPayment?.status === "verified" ||
+        session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay preparation rejected: this order already settled on one rail",
+          decision: "block", reasonCodes: ["rail_single_success"],
+        });
+        const r = { ok: false, state: session.state, error: "This order already settled on one rail; Agent Pay preparation is rejected.", reasonCodes: ["rail_single_success"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (session.externalOrderId) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay preparation rejected: a Razorpay payment was already initiated for this order",
+          decision: "block", reasonCodes: ["rail_already_initiated"],
+        });
+        const r = { ok: false, state: session.state, error: "A Razorpay payment was already initiated for this order; Agent Pay is rejected.", reasonCodes: ["rail_already_initiated"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (!session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
+        !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
+        record.intentDigest !== intentDigest(session.intent)) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay preparation rejected: this quote is no longer active for the current intent",
+          decision: "block", reasonCodes: ["quote_invalidated"],
+        });
+        const r = { ok: false, state: session.state, error: "Payment blocked: this quote is no longer active for the current intent", reasonCodes: ["quote_invalidated"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      const mandate = mandates.get(session.customerId);
+      const verdict = checkEnvelopeForPayment({
+        envelope: record.envelope,
+        mandate,
+        expectedDigest: record.digest,
+        rail: "x402_solana",
+        approved: Boolean(session.approvalEventId && session.approvedDigest === record.digest),
+        allowAutoApprove: false,
+      });
+      if (!verdict.allow) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: `Agent Pay preparation blocked: ${verdict.reasonCodes.join(", ")}`,
+          inputDigest: record.digest, decision: verdict.decision, reasonCodes: verdict.reasonCodes,
+        });
+        const r = { ok: false, state: session.state, error: `Policy blocked Agent Pay: ${verdict.reasonCodes.join(", ")}`, reasonCodes: verdict.reasonCodes };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (session.x402OrderPayment && session.x402OrderPayment.envelopeDigest === record.digest) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.duplicate", actor: "payment",
+          summary: `Duplicate Agent Pay preparation ignored; reusing ${session.x402OrderPayment.paymentIdentifier}`,
+          externalReferences: { paymentIdentifier: session.x402OrderPayment.paymentIdentifier },
+          decision: "review", reasonCodes: ["duplicate_prepare_reused"],
+        });
+        const r = { ok: true, payment: session.x402OrderPayment, state: session.state } as const;
+        if (operationId) coordinator.complete(operationId, "success", session.x402OrderPayment.paymentIdentifier, undefined, r);
+        return r;
+      }
+      const request: OrderPaymentRequest = {
+        logicalOrderId: orderId,
+        envelopeDigest: record.digest,
+        network: X402_MOCK_ORDER_NETWORK,
+        asset: X402_MOCK_ORDER_ASSET,
+        amountMinor: record.envelope.totalMinor,
+        currency: record.envelope.currency,
+        payee: X402_MOCK_ORDER_PAYEE,
+        purpose: X402_MOCK_ORDER_PURPOSE,
+      };
+      const requestDigest = canonicalOrderPaymentRequestDigest(request);
+      const payment: X402OrderPayment = {
+        paymentIdentifier: mockOrderPaymentIdentifier(requestDigest),
+        requestDigest,
+        envelopeDigest: record.digest,
+        network: request.network,
+        asset: request.asset,
+        amountMinor: request.amountMinor,
+        currency: request.currency,
+        recipient: request.payee,
+        status: "pending",
+      };
+      session.x402OrderPayment = payment;
+      void audit.log({
+        logicalOrderId: orderId, type: "x402_order.prepared", actor: "payment",
+        summary: `Agent Pay rail selected; mock order ${payment.paymentIdentifier} initiated for ${formatMinor(payment.amountMinor)} (Solana Devnet simulation, no funds moved)`,
+        externalReferences: { paymentIdentifier: payment.paymentIdentifier, requestDigest, envelopeDigest: record.digest },
+        inputDigest: record.digest, decision: "allow", reasonCodes: ["rail_selected", "mock_order_initiated"],
+      });
+      const prepareResult = { ok: true, payment, state: session.state } as const;
+      if (operationId) coordinator.complete(operationId, "success", payment.paymentIdentifier, undefined, prepareResult);
+      return prepareResult;
+      });
+    },
+
+    async confirmX402OrderPayment(orderId, paymentIdentifier, operationId) {
+      return withSessionLock(orderId, async () => {
+      if (operationId) {
+        const idempotency = coordinator.begin(operationId, "x402_order.confirm", { orderId, paymentIdentifier }, orderId);
+        if (idempotency.kind === "conflict") {
+          return { ok: false, state: "DRAFT", error: `Operation ID conflict: ${operationId} was already used with a different request` };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase === "completed" && idempotency.record.resultPayload !== undefined) {
+          return idempotency.record.resultPayload as { ok: boolean; state: OrderState; error?: string; reasonCodes?: string[] };
+        }
+        if (idempotency.kind === "replay" && idempotency.record.phase !== "completed") {
+          const session = sessions.get(orderId);
+          return { ok: false, state: session?.state ?? "DRAFT", error: "Operation in progress" };
+        }
+      }
+      const session = sessions.get(orderId);
+      if (!session) {
+        const r = { ok: false, state: "DRAFT" as OrderState, error: "Unknown session" };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, "Unknown session", r);
+        return r;
+      }
+      const record = envelopes.get(orderId);
+      const pending = session.x402OrderPayment;
+      if (!record || !pending || pending.paymentIdentifier !== paymentIdentifier) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay confirmation rejected: unknown payment identifier for this order",
+          decision: "block", reasonCodes: ["identifier_unknown"],
+        });
+        const r = { ok: false, state: session.state, error: "Unknown Agent Pay payment identifier for this order", reasonCodes: ["identifier_unknown"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (pending.status === "verified") {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.duplicate", actor: "payment",
+          summary: `Duplicate Agent Pay confirmation ignored; ${paymentIdentifier} already verified`,
+          externalReferences: { paymentIdentifier },
+          decision: "review", reasonCodes: ["duplicate_confirm_reused"],
+        });
+        const r = { ok: true, state: session.state } as const;
+        if (operationId) coordinator.complete(operationId, "success", paymentIdentifier, undefined, r);
+        return r;
+      }
+      if (record.digest !== pending.envelopeDigest || session.approvedDigest !== record.digest || !session.approvalEventId ||
+        !session.dialogue.quoteValid || !isCurrentRecommendation(session) ||
+        !sameRecommendationBinding(record.recommendation, recommendationBinding(session)) ||
+        record.intentDigest !== intentDigest(session.intent)) {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay confirmation rejected: the envelope changed since preparation — approve the exact envelope again",
+          inputDigest: pending.envelopeDigest, decision: "block", reasonCodes: ["quote_invalidated"],
+        });
+        const r = { ok: false, state: session.state, error: "Envelope changed since Agent Pay preparation; approve the exact envelope again", reasonCodes: ["quote_invalidated"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      if (session.verification?.verified || session.externalOrderId ||
+        session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
+        void audit.log({
+          logicalOrderId: orderId, type: "x402_order.rejected", actor: "policy",
+          summary: "Agent Pay confirmation rejected: this order already settled or started on one rail",
+          decision: "block", reasonCodes: ["rail_single_success"],
+        });
+        const r = { ok: false, state: session.state, error: "This order already settled or started on one rail; Agent Pay confirmation is rejected.", reasonCodes: ["rail_single_success"] };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+      pending.status = "verified";
+      pending.mockTxHash = `x402sim_${pending.requestDigest.slice(0, 12)}`;
+      session.verification = {
+        verified: true,
+        rail: "x402_solana",
+        externalOrderId: paymentIdentifier,
+        externalPaymentId: paymentIdentifier,
+        amountMinor: record.envelope.totalMinor,
+        currency: record.envelope.currency,
+        status: "captured",
+      };
+      session.externalPaymentId = paymentIdentifier;
+      setState(session, "PAYMENT_PENDING");
+      setState(session, "PAID_VERIFIED");
+      void audit.log({
+        logicalOrderId: orderId, type: "x402_order.verified", actor: "payment",
+        summary: `Agent Pay mock settlement ${paymentIdentifier} verified (${record.envelope.totalMinor} ${record.envelope.currency}; Solana Devnet simulation, no funds moved)`,
+        externalReferences: { paymentIdentifier, mockTxHash: pending.mockTxHash, envelopeDigest: record.digest },
+        decision: "allow", reasonCodes: ["mock_settlement_verified", "rail_binding_verified", "rail_single_success"],
+      });
+      const confirmResult = { ok: true, state: session.state, payment: { ...pending } } as const;
+      if (operationId) coordinator.complete(operationId, "success", paymentIdentifier, undefined, confirmResult);
+      return confirmResult;
+      });
     },
 
     async fulfil(orderId, fail, operationId) {
@@ -1094,6 +1374,25 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       }
 
       setState(session, "COMPENSATION_PENDING");
+      if (session.verification?.rail === "x402_solana") {
+        const compensationId = `cmp_MOCK_${session.externalPaymentId}`;
+        session.compensation = { refundId: compensationId, ok: true, reason: "mock compensating transfer" };
+        setState(session, "REFUNDED");
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "compensation.mock_resolved",
+          actor: "payment",
+          summary: `Mock compensating transfer ${compensationId} for ${formatMinor(record.envelope.totalMinor)} (Agent Pay simulation; not a Razorpay refund, not a reversal)`,
+          externalReferences: { compensationId, paymentIdentifier: session.externalPaymentId },
+          decision: "allow",
+          reasonCodes: ["mock_compensation_resolved"],
+        });
+        const mockRefundResult = { ok: true, state: session.state, refundId: compensationId } as const;
+        if (operationId) {
+          coordinator.complete(operationId, "success", compensationId, undefined, mockRefundResult);
+        }
+        return mockRefundResult;
+      }
       const adapter = registry.get("razorpay_checkout")!;
       try {
         const result = await adapter.compensate({

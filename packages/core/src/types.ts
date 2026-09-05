@@ -5,6 +5,8 @@ export const OPERATION_TYPES = [
   "approval.grant",
   "payment.initiate",
   "payment.verify",
+  "x402_order.prepare",
+  "x402_order.confirm",
   "fulfilment.complete",
   "compensation.refund",
 ] as const;
@@ -70,6 +72,15 @@ export type PaymentVerifyRequest = {
   externalPaymentId: string;
 };
 
+export type X402OrderPrepareRequest = {
+  orderId: string;
+};
+
+export type X402OrderConfirmRequest = {
+  orderId: string;
+  paymentIdentifier: string;
+};
+
 export type FulfilmentCompleteRequest = {
   orderId: string;
   fail: boolean;
@@ -86,6 +97,8 @@ export type OperationRequest =
   | { type: "approval.grant"; request: ApprovalGrantRequest }
   | { type: "payment.initiate"; request: PaymentInitiateRequest }
   | { type: "payment.verify"; request: PaymentVerifyRequest }
+  | { type: "x402_order.prepare"; request: X402OrderPrepareRequest }
+  | { type: "x402_order.confirm"; request: X402OrderConfirmRequest }
   | { type: "fulfilment.complete"; request: FulfilmentCompleteRequest }
   | { type: "compensation.refund"; request: CompensationRefundRequest };
 
