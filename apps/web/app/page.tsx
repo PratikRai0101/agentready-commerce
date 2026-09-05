@@ -10,7 +10,6 @@ import { ProductCard } from "./components/ProductCard";
 import { IntentPanel, type IntentField } from "./components/IntentPanel";
 import { LoadingIndicator } from "./components/LoadingIndicator";
 import { ProviderStatus } from "./components/ProviderStatus";
-import { DecisionLedger } from "./components/DecisionLedger";
 
 type QuoteResult = {
   envelope: CommerceEnvelope;
@@ -18,14 +17,6 @@ type QuoteResult = {
   signature: string;
   state: string;
   approvalEventId?: string;
-};
-
-type SettledReceipt = {
-  totalMinor: number;
-  currency: string;
-  externalOrderId?: string;
-  externalPaymentId?: string;
-  signature?: string;
 };
 
 type MachineSpendInfo = {
@@ -108,7 +99,6 @@ export default function HomePage() {
   });
   const [timeline, setTimeline] = useState<AuditEvent[]>([]);
   const [paymentIds, setPaymentIds] = useState<{ orderId?: string; paymentId?: string; signature?: string } | null>(null);
-  const [settledReceipt, setSettledReceipt] = useState<SettledReceipt | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
@@ -119,17 +109,6 @@ export default function HomePage() {
   const [recommendationBinding, setRecommendationBinding] = useState<RecommendationBinding | null>(null);
   const [loadingMsg, setLoadingMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [pendingUpdatedReview, setPendingUpdatedReview] = useState(false);
-  const [editingChip, setEditingChip] = useState<string | null>(null);
-  const [chatExpanded, setChatExpanded] = useState(false);
-  const [auditExpanded, setAuditExpanded] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const check = () => setIsMobile(typeof window !== "undefined" ? window.innerWidth < 960 : false);
-    check();
-    window.addEventListener("resize", check);
-    return () => window.removeEventListener("resize", check);
-  }, []);
   const chatRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -162,7 +141,6 @@ export default function HomePage() {
     setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
-    setSettledReceipt(null);
     setIntent([]);
     setIntentVersion(0);
     const response = await fetch("/api/session", { method: "POST" });
@@ -353,7 +331,6 @@ export default function HomePage() {
     async (key: string) => {
       if (!orderId) return;
       setBusy(true);
-      setPendingUpdatedReview(true);
       try {
         // Build patch that removes the field by setting it to undefined via the server
         const patch: Record<string, unknown> = {};
@@ -368,7 +345,6 @@ export default function HomePage() {
         else {
           // Unknown key — just remove locally
           setIntent((prev) => prev.filter((f) => f.key !== key));
-          setPendingUpdatedReview(false);
           setBusy(false);
           return;
         }
@@ -408,11 +384,9 @@ export default function HomePage() {
           void refreshTimeline(orderId);
         } else {
           pushAgent(`Could not remove: ${data.error}`);
-          setPendingUpdatedReview(false);
         }
       } catch {
         pushAgent("Something went wrong. Please retry.");
-        setPendingUpdatedReview(false);
       }
       setBusy(false);
     },
@@ -423,7 +397,6 @@ export default function HomePage() {
     async (key: string, newValue: string) => {
       if (!orderId) return;
       setBusy(true);
-      setPendingUpdatedReview(true);
       setErrorMsg(null);
       try {
         // Build structured patch from chip key and new value
@@ -488,22 +461,19 @@ export default function HomePage() {
             setQuote(null);
           }
           pushAgent("Updated your requirements. Here are your refreshed options.");
-          setEditingChip(null);
           void refreshTimeline(orderId);
         } else {
           // Failure: retain last confirmed server value, show error
           pushAgent(`Could not update: ${data.error}`);
           setErrorMsg(data.error);
-          setPendingUpdatedReview(false);
         }
       } catch {
         pushAgent("Something went wrong on our side. Please retry.");
         setErrorMsg("Network error. Please try again.");
-        setPendingUpdatedReview(false);
       }
       setBusy(false);
     },
-    [orderId, intentVersion, pushAgent, refreshTimeline, setEditingChip],
+    [orderId, intentVersion, pushAgent, refreshTimeline],
   );
 
   const approve = useCallback(async () => {
@@ -573,40 +543,13 @@ export default function HomePage() {
       setPaymentIds((prev) => ({ ...prev, paymentId: externalPaymentId, signature }));
       if (data.ok) {
         pushAgent(`Payment verified. Order is now PAID_VERIFIED — fulfilment may begin.`);
-        // Snapshot the settled receipt independently of the active quote so
-        // follow-up chat (which may clear the quote) cannot erase the receipt.
-        setSettledReceipt({
-          totalMinor: quote?.envelope.totalMinor ?? 0,
-          currency: quote?.envelope.currency ?? "INR",
-          externalOrderId,
-          externalPaymentId,
-          signature,
-        });
       } else {
         pushAgent(`Payment verification failed: ${data.error}`);
       }
       void refreshTimeline(orderId);
       setBusy(false);
     },
-    [orderId, pushAgent, quote, refreshTimeline],
-  );
-
-  const fulfil = useCallback(
-    async (fail: boolean) => {
-      if (!orderId) return;
-      setBusy(true);
-      const response = await fetch("/api/fulfil", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId, fail }),
-      });
-      const data = await response.json();
-      setOrderState(data.state);
-      pushAgent(data.ok ? "Order fulfilled and shipped." : `Fulfilment failed: ${data.error}`);
-      void refreshTimeline(orderId);
-      setBusy(false);
-    },
-    [orderId, pushAgent, quote, refreshTimeline],
+    [orderId, pushAgent, refreshTimeline],
   );
 
   const mockCapture = useCallback(async () => {
@@ -625,6 +568,24 @@ export default function HomePage() {
     }
     setBusy(false);
   }, [orderId, pushAgent, verifyPayment]);
+
+  const fulfil = useCallback(
+    async (fail: boolean) => {
+      if (!orderId) return;
+      setBusy(true);
+      const response = await fetch("/api/fulfil", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId, fail }),
+      });
+      const data = await response.json();
+      setOrderState(data.state);
+      pushAgent(data.ok ? "Order fulfilled and shipped." : `Fulfilment failed: ${data.error}`);
+      void refreshTimeline(orderId);
+      setBusy(false);
+    },
+    [orderId, pushAgent, refreshTimeline],
+  );
 
   const compensate = useCallback(async () => {
     if (!orderId) return;
@@ -657,7 +618,6 @@ export default function HomePage() {
     setRecommendationBinding(null);
     setTimeline([]);
     setPaymentIds(null);
-    setSettledReceipt(null);
     setNotice(null);
     setIntent([]);
     pushAgent("Server state reset. Fresh conversation started.");
@@ -675,7 +635,6 @@ export default function HomePage() {
     setMachineSpend(null);
     setQuote(null);
     setPaymentIds(null);
-    setSettledReceipt(null);
     setRecommendationBinding(null);
     setIntent([]);
     const response = await fetch("/api/scenario");
@@ -741,52 +700,156 @@ export default function HomePage() {
         </nav>
       </header>
 
-      {/* ── Decision Ledger (integrated from frozen prototype) ── */}
-      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        <DecisionLedger
-          variant={isMobile ? "mobile" : "desktop"}
-          messages={messages}
-          questions={questions}
-          quickReplies={quickReplies}
-          input={input}
-          onInputChange={setInput}
-          onSend={send}
-          busy={busy}
-          intent={intent}
-          intentVersion={intentVersion}
-          editingChip={editingChip}
-          onStartEdit={setEditingChip}
-          onSaveEdit={handleChipEdit}
-          onCancelEdit={() => setEditingChip(null)}
-          onRemove={handleChipRemove}
-          showLoading={busy}
-          pendingUpdatedReview={pendingUpdatedReview}
-          onPendingReviewSeen={() => setPendingUpdatedReview(false)}
-          matches={matches}
-          fitScores={fitScores}
-          selectedId={quote?.envelope.items[0]?.productId ?? null}
-          onSelect={chooseProduct}
-          quote={quote}
-          orderState={orderState}
-          approved={!!quote?.approvalEventId}
-          onApprove={approve}
-          onUnapprove={() => {}}
-          timeline={timeline}
-          machineSpend={machineSpend}
-          paymentIds={paymentIds}
-          receipt={settledReceipt}
-          isMock={isMock}
-          onInitiate={initiate}
-          onMockCapture={mockCapture}
-          onFulfil={() => fulfil(false)}
-          onCompensate={compensate}
-          techExpanded={techExpanded}
-          onToggleTech={() => setTechExpanded(!techExpanded)}
-          chatExpanded={chatExpanded}
-          onToggleChat={() => setChatExpanded(!chatExpanded)}
-          auditExpanded={auditExpanded}
-          onToggleAudit={() => setAuditExpanded(!auditExpanded)}
-        />
+      {/* ── Two-column layout ── */}
+      <div className="page-grid">
+        {/* ── Chat column ── */}
+        <section className="chat-col" aria-label="Conversation">
+          <div className="chat-header">
+            <h1>{heading}</h1>
+            <p>{subheading}</p>
+          </div>
+          <div className="chat-messages" ref={chatRef} role="log" aria-live="polite">
+            {messages.map((message, index) => (
+              <div key={index} className={`msg ${message.role}`}>
+                {message.text}
+              </div>
+            ))}
+            {questions.length > 0 && (
+              <div className="msg agent">
+                {questions.length === 1 ? questions[0] : questions.join(" · ")}
+              </div>
+            )}
+            {hasQuickReplies && (
+              <div className="quick-btns" role="group" aria-label="Quick replies">
+                {quickReplies.map((reply) => (
+                  <button key={reply} type="button" className="quick-btn" onClick={() => send(reply)} disabled={busy}>
+                    {reply}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {!receipt && (
+            <div className="composer" role="form" aria-label="Message input">
+              <input
+                className="composer-input"
+                type="text"
+                value={input}
+                placeholder={messages.length === 0 ? SUGGESTED : "Ask about a shoe, compare, or refine…"}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void send(input || SUGGESTED);
+                }}
+                aria-label="Message the assistant"
+              />
+              <button
+                className="composer-send"
+                type="button"
+                onClick={() => send(input || SUGGESTED)}
+                disabled={busy}
+              >
+                Send
+              </button>
+            </div>
+          )}
+        </section>
+
+        {/* ── Content column ── */}
+        <section className="content-col" aria-label="Content">
+          {/* Progress steps */}
+          <div className="progress-steps" role="navigation" aria-label="Order progress">
+            {STEPS.map((label, i) => (
+              <span key={label} className={`step${i === step ? " active" : ""}`}>
+                <span className="step-num">{i + 1}</span> {label}
+              </span>
+            ))}
+          </div>
+
+          {/* Receipt view */}
+          {receipt && quote && (
+            <ReceiptView
+              orderState={orderState}
+              quote={quote}
+              paymentIds={paymentIds}
+            />
+          )}
+
+          {/* Constraint chips → Intent panel */}
+          {intent.length > 0 && !receipt && (
+            <IntentPanel fields={intent} onRemove={handleChipRemove} onEdit={handleChipEdit} />
+          )}
+
+          {/* Loading indicator */}
+          <LoadingIndicator busy={busy} error={errorMsg} onRetry={() => setErrorMsg(null)} />
+
+          {/* Recommendations */}
+          {matches && !receipt && (
+            <>
+              <div className="recs-header">
+                <h2>Recommendations</h2>
+              </div>
+              <div className="recs-grid">
+                {matches.map((match) => (
+                  <ProductCard
+                    key={match.product.productId}
+                    match={match}
+                    fitScore={fitScores?.[match.product.productId]}
+                    onSelect={chooseProduct}
+                    onExplain={(pid) => void send(`why ${match.product.name}?`)}
+                    onCompare={(pid) => void send(`compare it with ${match.product.name}`)}
+                    disabled={busy}
+                    showSelect={!quote}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Empty state */}
+          {!matches && !receipt && messages.length > 0 && (
+            <div className="empty-state">
+              <h3>Recommendations appear here</h3>
+              <p>Answer the question above and I’ll shortlist your best matches.</p>
+            </div>
+          )}
+
+          {/* Quote / approval panel */}
+          {quote && !receipt && (
+            <div style={{ marginTop: 20 }}>
+              <ApprovalPanel quote={quote} onApprove={approve} busy={busy} />
+            </div>
+          )}
+
+          {/* Payment controls */}
+          {quote && quote.approvalEventId && !receipt && (
+            <div style={{ marginTop: 16 }}>
+              <PaymentControls
+                orderState={orderState}
+                paymentIds={paymentIds}
+                isMock={isMock}
+                busy={busy}
+                onInitiate={initiate}
+                onMockCapture={mockCapture}
+                onFulfil={() => fulfil(false)}
+                onCompensate={compensate}
+              />
+            </div>
+          )}
+
+          {/* Notice */}
+          {notice && (
+            <div style={{ marginTop: 16, padding: 14, background: "var(--warn-soft)", borderRadius: "var(--radius)", fontSize: 13, color: "var(--warn)" }}>
+              {notice}
+            </div>
+          )}
+
+          {/* Builder demo link */}
+          <div style={{ marginTop: "auto", paddingTop: 20 }}>
+            <a href="/demo" style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none" }}>
+              Builder demo &rarr;
+            </a>
+          </div>
+        </section>
       </div>
 
       {/* ── Trust Drawer ── */}
