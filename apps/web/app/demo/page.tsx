@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuditEvent } from "@agentready/audit";
 import type { ConformanceReport } from "@agentready/conformance";
 import { RunVistaBrand } from "../components/RunVistaBrand";
@@ -19,21 +19,47 @@ export default function DemoLabPage() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const refreshTimeline = useCallback(async (orderId: string) => {
-    const res = await fetch(`/api/audit?orderId=${orderId}`);
+  // Sealed session token: harvested from every response, presented back on
+  // every request, so consecutive requests keep working across serverless
+  // instances. Stored in a ref; the state mirror only re-renders on change.
+  const tokenRef = useRef<string | null>(null);
+  const [, setSessionToken] = useState<string | null>(null);
+  const apiPost = useCallback(async (path: string, body: Record<string, unknown>) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (tokenRef.current) headers["x-session-token"] = tokenRef.current;
+    const res = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
     const data = await res.json();
-    setTimeline(data.events ?? []);
+    if (typeof data?.sessionToken === "string" && data.sessionToken) {
+      tokenRef.current = data.sessionToken;
+      setSessionToken(data.sessionToken);
+    }
+    return data;
   }, []);
+  const harvestToken = useCallback((data: { sessionToken?: unknown }) => {
+    if (typeof data?.sessionToken === "string" && data.sessionToken) {
+      tokenRef.current = data.sessionToken;
+      setSessionToken(data.sessionToken);
+    }
+  }, []);
+  const tokenHeaders = useCallback((): Record<string, string> => {
+    return tokenRef.current ? { "x-session-token": tokenRef.current } : {};
+  }, []);
+
+  const refreshTimeline = useCallback(async (orderId: string) => {
+    const res = await fetch(`/api/audit?orderId=${orderId}`, { headers: tokenRef.current ? { "x-session-token": tokenRef.current } : {} });
+    const data = await res.json();
+    harvestToken(data);
+    setTimeline(data.events ?? []);
+  }, [harvestToken]);
 
   const startSession = useCallback(async () => {
     setBusy(true);
-    const res = await fetch("/api/session", { method: "POST" });
-    const data = await res.json();
+    const data = await apiPost("/api/session", {});
     setSession({ orderId: data.orderId, state: data.state, rails: data.rails ?? [], indicators: data.indicators ?? { razorpay: "mock", x402: "mock", llm: "disabled" } });
     setTimeline([]);
     setConformance(null);
     setBusy(false);
-  }, []);
+  }, [apiPost]);
 
   useEffect(() => {
     void startSession();
@@ -42,23 +68,23 @@ export default function DemoLabPage() {
   const runScenario = useCallback(async () => {
     setBusy(true);
     setNotice(null);
-    const res = await fetch("/api/scenario");
+    const res = await fetch("/api/scenario", { headers: tokenHeaders() });
     const data = await res.json();
+    harvestToken(data);
     setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
     setTimeline(data.events ?? []);
     setBusy(false);
-  }, []);
+  }, [harvestToken, tokenHeaders]);
 
   const resetServer = useCallback(async () => {
     setBusy(true);
-    const res = await fetch("/api/reset", { method: "POST" });
-    const data = await res.json();
+    const data = await apiPost("/api/reset", {});
     setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
     setTimeline([]);
     setConformance(null);
     setNotice(null);
     setBusy(false);
-  }, []);
+  }, [apiPost]);
 
   const runConformance = useCallback(async () => {
     setBusy(true);
@@ -74,12 +100,7 @@ export default function DemoLabPage() {
       // Self-contained: the endpoint drives approve → tamper → stale
       // approval/payment attempts inside one request, so the result never
       // depends on in-memory state shared across serverless instances.
-      const res = await fetch("/api/demo/price-drift", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ field }),
-      });
-      const data = await res.json();
+      const data = await apiPost("/api/demo/price-drift", { field });
       if (data.ok) {
         setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
         setTimeline(data.events ?? []);
@@ -98,8 +119,7 @@ export default function DemoLabPage() {
     setBusy(true);
     // Self-contained: the endpoint drives one session to PAYMENT_PENDING and
     // delivers the same webhook twice under one event ID inside one request.
-    const res = await fetch("/api/demo/webhook-replay", { method: "POST" });
-    const data = await res.json();
+    const data = await apiPost("/api/demo/webhook-replay", {});
     if (data.ok) {
       setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
       setTimeline(data.events ?? []);
@@ -115,12 +135,7 @@ export default function DemoLabPage() {
   const duplicateRequest = useCallback(async () => {
     if (!session) return;
     setBusy(true);
-    const res = await fetch("/api/respond", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId, message: "I need black shoes under ₹5,000." }),
-    });
-    const data = await res.json();
+    const data = await apiPost("/api/respond", { orderId: session.orderId, message: "I need black shoes under ₹5,000." });
     setNotice(`Duplicate request: state ${data.state}, kind ${data.kind}`);
     void refreshTimeline(session.orderId);
     setBusy(false);
@@ -129,12 +144,7 @@ export default function DemoLabPage() {
   const fulfilFail = useCallback(async () => {
     if (!session) return;
     setBusy(true);
-    const res = await fetch("/api/fulfil", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId, fail: true }),
-    });
-    const data = await res.json();
+    const data = await apiPost("/api/fulfil", { orderId: session.orderId, fail: true });
     setNotice(`Fulfilment: ${data.ok ? "ok" : data.error}`);
     void refreshTimeline(session.orderId);
     setBusy(false);
@@ -143,12 +153,7 @@ export default function DemoLabPage() {
   const startRefund = useCallback(async () => {
     if (!session) return;
     setBusy(true);
-    const res = await fetch("/api/compensate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId }),
-    });
-    const data = await res.json();
+    const data = await apiPost("/api/compensate", { orderId: session.orderId });
     setNotice(data.ok ? `Refund initiated: ${data.refundId ?? "n/a"}` : `Compensation failed: ${data.error}`);
     void refreshTimeline(session.orderId);
     setBusy(false);
