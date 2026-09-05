@@ -68,6 +68,42 @@ Production server started locally with the posture above
 Rehearsal server stopped after the run. No payment, settlement, Devnet
 transaction, migration, or destructive operation was performed at any point.
 
+## 5. Production deployment record (sanitized, no secrets or raw ids)
+
+- Project: `agentready-commerce` (`pratikrai0101s-projects`), Root Directory
+  `apps/web` with outside-root sources included (requester-set).
+- Attempt history: (1) repo-root build failed in ~20s on Next.js framework
+  detection (`next` lives in `apps/web`); Error state, never live.
+  (2) after the Root Directory fix, the Next.js build succeeded but the
+  deploy failed on Output Directory resolution (`apps/web/.next`
+  double-resolved against the new root). (3) one-line config fix
+  (`outputDirectory` → `.next`, resolving against Root Directory
+  `apps/web`; committed `vercel.json` on `main` still carries the old
+  value — follow-up PR pending) → **Ready**.
+- Live deployment host: `agentready-commerce-cnomz9yd3-…vercel.app`;
+  production alias: `https://agentready-commerce-pied.vercel.app`
+  (verified public). The default project domain currently requires Vercel
+  login (302 → SSO), so the `-pied` alias is the public demo URL.
+- Env verification (`vercel env ls`, names only): six Production variables
+  present — `ENVELOPE_SIGNING_SECRET`, `RAZORPAY_WEBHOOK_SECRET`,
+  `X402_MODE`, `X402_SETTLEMENT_ENABLED`, `X402_LIVE_DEVNET_TEST`
+  (singular), `NEXT_PUBLIC_APP_URL`. Values hidden, never read. Absent
+  (safe defaults: mock adapter, deterministic LLM): `RAZORPAY_KEY_ID`,
+  `RAZORPAY_KEY_SECRET`, `LLM_API_KEY`; no `DATABASE_URL` family, no
+  keypair paths. No environment variable was changed by this task.
+- Production endpoint checks (public alias): `/` 200, `/ledger-prototype`
+  200, `/api/status` 200 (`razorpay: mock`, `x402: mock`, `llm: disabled`,
+  mock adapter, mock envelope signing), `/.well-known/agentready` 200
+  (mock modes), `/api/catalog` 200 (6 products).
+- Public browser smoke: storefront 42/42 (desktop + mobile; nonce checks
+  skipped — public host carries no run nonce by design), prototype 20/20;
+  all ids `order_MOCK_*` / `pay_MOCK_*`, zero external egress.
+- Deployment log inspection (sanitized): build-only lines, status Ready;
+  single `@solana/kit` mention is dependency installation, not an RPC call;
+  only external host referenced is a docs link; secret-pattern scan clean.
+  No payment, settlement, Devnet/Mainnet transaction, migration,
+  Razorpay/Solana API call, or production-mode activation performed.
+
 ## 4. Requester handoff (deployment still requires requester login)
 
 1. `npm i -g vercel && vercel login`, then `vercel link` at the repo root.
