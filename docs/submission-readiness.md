@@ -1,12 +1,11 @@
 # Submission readiness checklist
 
-Frozen storefront scope. Nothing below is committed, published, or merged.
-Check each item off with the stated command or artifact immediately before
-submission; do not carry forward stale claims.
+Repository is public. Check each item off with the stated command or artifact
+immediately before submission; do not carry forward stale claims.
 
 ## Verified (re-run on submission day)
 
-- [ ] Unit suite green: `pnpm --filter @agentready/web test` (last measured: 411 passed / 1 skipped, 20 files, 2026-09-04)
+- [ ] Unit suite green: `pnpm -r test` (last measured: 557 passed / 12 skipped — apps/web 462/12, packages 95 — 2026-09-05; conformance 15/15)
 - [ ] Typecheck clean: `pnpm lint`
 - [ ] No whitespace errors: `git diff --check`
 - [ ] Mock browser smoke: `PORT=31xx node apps/web/test/browser-smoke.mjs` against a mock-env server (last: 38/38 desktop+mobile)
@@ -23,8 +22,8 @@ submission; do not carry forward stale claims.
 
 ## Still pending (blockers until done)
 
-- [ ] Pitch video (5 min per `docs/demo-and-evaluation.md` script, mock UI, no live payments on camera)
-- [ ] Public repository flip + secrets pre-flight (keys stay local; `data/proof/` stays ignored)
+- [ ] Pitch video (5 min per `docs/pitch-script.md`: 608 spoken words, mock UI, recorded evidence stills, no live payments on camera)
+- [ ] Secrets pre-flight re-check (keys stay local; `data/proof/` stays ignored)
 - [ ] Provider-console read for the LLM run (prompt/completion/reasoning totals → billed cost via official Groq rates)
 - [ ] Any LLM or Devnet re-run needs fresh explicit approval (single-session rule)
 

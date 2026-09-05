@@ -96,7 +96,7 @@ packages/catalog      Seeded RunVista running-shoe catalog, deterministic filter
 packages/payments     PaymentAdapter interface, Razorpay adapter (Orders/verify/refund),
                       Mock adapter, x402 v2 protocol helpers, DevnetMachineResource
 packages/audit        Event ledger and timeline projection
-packages/conformance  10 critical invariants (gate suite) over a plane contract
+packages/conformance  15 critical invariants (gate suite) over a plane contract
 ```
 
 ## Architecture
@@ -212,9 +212,10 @@ refund is always the Razorpay refund, never an x402 “reversal”.
 - LLM cost figures beyond the theoretical $0.0022 ceiling in
   [`docs/evidence/llm-verification-3msg.md`](docs/evidence/llm-verification-3msg.md)
   require the provider console; exact per-call tokens were unavailable for that run.
-- Repository visibility is currently private; the public artifact is the Vercel
-  demo alias until the owner flips it. Test suites were last measured at
-  411 passed / 1 skipped across 20 files (2026-09-04); re-run `pnpm test` and
+- Repository is public; the live demo alias is the Vercel deployment above.
+  Test suites were last measured at 557 passed / 12 skipped (apps/web: 462
+  passed / 12 skipped across 23 files + 1 skipped file; packages: 95 passed
+  across 7 files; 2026-09-05) with conformance 15/15; re-run `pnpm test` and
   `pnpm typecheck` before judging.
 
 ## Product thesis

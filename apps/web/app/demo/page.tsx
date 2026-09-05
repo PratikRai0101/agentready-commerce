@@ -70,46 +70,47 @@ export default function DemoLabPage() {
 
   const tamper = useCallback(
     async (field: "price" | "variant") => {
-      if (!session) return;
       setBusy(true);
-      const res = await fetch("/api/tamper", {
+      // Self-contained: the endpoint drives approve → tamper → stale
+      // approval/payment attempts inside one request, so the result never
+      // depends on in-memory state shared across serverless instances.
+      const res = await fetch("/api/demo/price-drift", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: session.orderId, field }),
+        body: JSON.stringify({ field }),
       });
       const data = await res.json();
       if (data.ok) {
-        setNotice(`Material change detected: ${data.changes.join("; ")}`);
+        setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
+        setTimeline(data.events ?? []);
+        setNotice(
+          `Price drift: approval ${String(data.approvedDigest).slice(0, 12)}… invalidated → ${data.state}; ${data.changes.join("; ")}; stale approval blocked; stale payment blocked.`,
+        );
       } else {
-        setNotice(`Tamper failed: ${data.error}`);
+        setNotice(`Price drift failed: ${data.error}`);
       }
-      void refreshTimeline(session.orderId);
       setBusy(false);
     },
-    [session, refreshTimeline],
+    [],
   );
 
   const replayWebhook = useCallback(async () => {
-    if (!session) return;
     setBusy(true);
-    const first = await fetch("/api/webhook/simulate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId, replay: false }),
-    });
-    const firstData = await first.json();
-    const second = await fetch("/api/webhook/simulate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: session.orderId, replay: true }),
-    });
-    const secondData = await second.json();
-    setNotice(
-      `Webhook replay: first ${firstData.processed ? "processed" : "failed"} (${firstData.deduplicated ? "dedup" : "fresh"}), second ${secondData.deduplicated ? "deduplicated" : "processed"}.`,
-    );
-    void refreshTimeline(session.orderId);
+    // Self-contained: the endpoint drives one session to PAYMENT_PENDING and
+    // delivers the same webhook twice under one event ID inside one request.
+    const res = await fetch("/api/demo/webhook-replay", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      setSession((prev) => prev ? { ...prev, orderId: data.orderId, state: data.state } : prev);
+      setTimeline(data.events ?? []);
+      const first = data.first.processed && !data.first.deduplicated ? "processed (fresh)" : "unexpected";
+      const second = data.second.deduplicated ? "deduplicated" : "unexpected";
+      setNotice(`Webhook replay: first ${first}, second ${second}.`);
+    } else {
+      setNotice(`Webhook replay failed: ${data.error}`);
+    }
     setBusy(false);
-  }, [session, refreshTimeline]);
+  }, []);
 
   const duplicateRequest = useCallback(async () => {
     if (!session) return;
@@ -162,7 +163,7 @@ export default function DemoLabPage() {
           <a href="/">Shop</a>
           <a href="/#trust">Order &amp; trust</a>
           <span className="active">Demo Lab</span>
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>TEST MODE</span>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{indicators.razorpay === "test" ? "TEST MODE" : "MOCK"}</span>
         </nav>
         <RunVistaBrand />
       </header>
@@ -267,7 +268,7 @@ export default function DemoLabPage() {
             <h3>Providers &amp; modes</h3>
             <div className="provider-row">
               <span className="prov-name">Razorpay</span>
-              <span className="prov-detail">rzp_test_ keys &middot; capture verified</span>
+              <span className="prov-detail">{indicators.razorpay === "test" ? "rzp_test_ keys · capture verified" : indicators.razorpay === "live" ? "live keys · capture verified" : "Mock adapter · no keys · no funds moved"}</span>
               <span className={`prov-mode ${indicators.razorpay}`}>{indicators.razorpay === "test" ? "TEST MODE" : indicators.razorpay === "live" ? "live" : "MOCK"}</span>
             </div>
             <div className="provider-row">

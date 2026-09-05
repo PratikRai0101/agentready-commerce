@@ -1300,7 +1300,7 @@ function TrustDrawer({
                   <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-soft)", marginBottom: 4 }}>Providers</div>
                   <div className="provider-row">
                     <span className="prov-name">Razorpay</span>
-                    <span className="prov-detail">rzp_test_ keys &middot; capture verified</span>
+                    <span className="prov-detail">{indicators.razorpay === "test" ? "rzp_test_ keys · capture verified" : indicators.razorpay === "live" ? "live keys · capture verified" : "Mock adapter · no keys · no funds moved"}</span>
                     <span className={`prov-mode ${indicators.razorpay}`}>{indicators.razorpay === "test" ? "TEST MODE" : indicators.razorpay === "live" ? "live" : "MOCK"}</span>
                   </div>
                   <div className="provider-row">
