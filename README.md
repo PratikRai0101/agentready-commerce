@@ -16,6 +16,19 @@ ambiguous request → clarification → ranked shortlist → exact envelope
 
 Negative paths are first-class demo scenes: price/variant tampering after approval, duplicate requests, replayed webhooks, forged signatures, and paid-but-unfulfillable orders (refund recovery).
 
+### x402/Solana machine rail
+
+The agent can purchase a premium fit-scoring resource through x402/Solana. Two modes:
+
+- **Mock** (`X402_MODE=mock`): Simulated settlements, no funds moved. Clearly labelled everywhere as "x402 MOCK — no funds moved."
+- **Devnet** (`X402_MODE=devnet`): Real Solana Devnet USDC transactions via the official x402 facilitator. Clearly labelled everywhere as "x402 SOLANA DEVNET — test tokens, no real money."
+
+One real Devnet settlement was executed through the application path and is
+documented in [`docs/devnet-settlement-evidence-app-path-2026-09-04.md`](docs/devnet-settlement-evidence-app-path-2026-09-04.md).
+It used test tokens only; no replacement transaction was submitted. The live
+test remains gated behind `X402_LIVE_DEVNET_TEST=1` and valid credentials. See
+"Devnet setup" below.
+
 ## Run it
 
 Prerequisites: Node 20+, pnpm.
@@ -27,7 +40,7 @@ pnpm dev                    # http://localhost:3000
 ```
 
 ```bash
-pnpm test                   # 106 tests: unit, adversarial, integration, conformance
+pnpm test                   # unit, adversarial, integration, conformance tests
 pnpm typecheck
 ```
 
@@ -40,6 +53,19 @@ clearly-labelled `MockRazorpayAdapter` (same signature scheme, same code path).
 The web app reads environment files from `apps/web/` (Next.js convention); there is no root `.env`
 loading.
 
+## Devnet setup
+
+Follow the [read-only preflight and approval-gated runbook](docs/devnet-preflight.md).
+Do not create or fund a wallet, set up a live payer, or run the live integration
+test until explicit owner approval is given. The live test is skipped by
+default; it requires `X402_LIVE_DEVNET_TEST=1`, `X402_MODE=devnet`, a payer
+keypair path, a payee public address, and an RPC URL.
+
+**Pinned dependencies for reproducible demo builds:**
+- `@x402/core@2.24.0`, `@x402/svm@2.24.0`
+- `@solana/kit@5.5.1`
+- `@noble/curves@2.4.0`, `@scure/base@2.4.0`
+
 ## Repo layout
 
 ```text
@@ -49,7 +75,7 @@ packages/domain       PurchaseIntent/Mandate, Commerce Envelope, canonicalizatio
                       SHA-256 hashing, HMAC signing, order state machine, policy engine
 packages/catalog      Seeded RunVista running-shoe catalog, deterministic filtering/ranking
 packages/payments     PaymentAdapter interface, Razorpay adapter (Orders/verify/refund),
-                      Mock adapter, x402 v2 protocol helpers
+                      Mock adapter, x402 v2 protocol helpers, DevnetMachineResource
 packages/audit        Event ledger and timeline projection
 packages/conformance  10 critical invariants (gate suite) over a plane contract
 ```
@@ -82,7 +108,8 @@ Fulfilment/refund state machine → unified audit timeline
 - Approval binds to the exact envelope hash; any material change requires reapproval.
 - The LLM (when configured) only interprets and explains. Money movement is gated by deterministic policy code.
 - One logical retail order may have one successful rail only.
-- x402 is used for agent tool spend on a digital resource (premium fit-scoring API), memo-anchored to the request digest. Mock settlements are explicitly labelled; no synthetic data is presented as live.
+- x402 is used for agent tool spend on a digital resource (premium fit-scoring API), memo-anchored to the request digest. Mock settlements are clearly labelled; no synthetic data is presented as live.
+- Devnet settlements are labelled "x402 SOLANA DEVNET — test tokens, no real money" and include verified on-chain memo evidence where available.
 - The conformance suite verifies *our declared invariants*; it is not an independent certification of Razorpay, Solana, x402 or any third party.
 - Vulcan is not claimed — no official interface was available. A neutral seam is documented in `docs/architecture.md`.
 

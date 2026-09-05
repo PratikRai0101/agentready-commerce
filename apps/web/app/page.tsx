@@ -61,8 +61,12 @@ function maskId(id: string): string {
 function humaniseEvent(event: AuditEvent): string {
   const s = event.summary;
   if (s.includes("Ranked 3 products for")) return "Recommendations ranked";
-  if (s.includes("Fit-scoring invoked")) return "Fit-scoring invoked (x402 MOCK — no real funds moved)";
-  if (s.includes("Paid RunVista Premium Fit-Scoring API")) return "Fit-scoring invoked (x402 MOCK — no real funds moved)";
+  if (s.includes("Fit-scoring invoked") && s.includes("MOCK")) return "Fit-scoring invoked (x402 MOCK — no funds moved)";
+  if (s.includes("Fit-scoring invoked") && s.includes("DEVNET")) return "Fit-scoring invoked (x402 SOLANA DEVNET — test tokens, no real money)";
+  if (s.includes("Fit-scoring invoked")) return "Fit-scoring invoked";
+  if (s.includes("Paid RunVista Premium Fit-Scoring API") && s.includes("MOCK")) return "Fit-scoring invoked (x402 MOCK — no funds moved)";
+  if (s.includes("Paid RunVista Premium Fit-Scoring API") && s.includes("DEVNET")) return "Fit-scoring invoked (x402 SOLANA DEVNET — test tokens, no real money)";
+  if (s.includes("Paid RunVista Premium Fit-Scoring API")) return "Fit-scoring invoked";
   if (s.includes("Session created")) return "Session started";
   if (s.includes("Got it")) {
     const detail = s.replace(/^Got it\s*[—–-]\s*/, "").replace(/\.\s*Before I shortlist.*$/, "").replace(/\.\s*One more detail.*$/, "").trim();
@@ -525,23 +529,6 @@ export default function HomePage() {
     setBusy(false);
   }, [orderId, quote, rails, pushAgent, refreshTimeline]);
 
-  const mockCapture = useCallback(async () => {
-    if (!orderId) return;
-    setBusy(true);
-    const response = await fetch("/api/pay/mock-capture", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId }),
-    });
-    const data = await response.json();
-    if (data.error) {
-      pushAgent(`Capture failed: ${data.error}`);
-    } else {
-      await verifyPayment(data.orderId, data.paymentId, data.signature);
-    }
-    setBusy(false);
-  }, [orderId, pushAgent]);
-
   const verifyPayment = useCallback(
     async (externalOrderId: string, externalPaymentId: string, signature: string) => {
       if (!orderId) return;
@@ -564,6 +551,23 @@ export default function HomePage() {
     },
     [orderId, pushAgent, refreshTimeline],
   );
+
+  const mockCapture = useCallback(async () => {
+    if (!orderId) return;
+    setBusy(true);
+    const response = await fetch("/api/pay/mock-capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId }),
+    });
+    const data = await response.json();
+    if (data.error) {
+      pushAgent(`Capture failed: ${data.error}`);
+    } else {
+      await verifyPayment(data.orderId, data.paymentId, data.signature);
+    }
+    setBusy(false);
+  }, [orderId, pushAgent, verifyPayment]);
 
   const fulfil = useCallback(
     async (fail: boolean) => {
@@ -1259,7 +1263,18 @@ function TrustDrawer({
                     <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-soft)", marginBottom: 4 }}>x402 Machine spend</div>
                     <div style={{ fontSize: 12 }}>
                       {machineSpend.amount} USDC via x402 v2 &middot; {machineSpend.network} &middot;{" "}
-                      <span className="mono">{maskId(machineSpend.txHash)}</span> &middot; {machineSpend.mock ? "MOCK" : "live"}
+                      <a
+                        href={machineSpend.txHash && !machineSpend.mock
+                          ? `https://explorer.solana.com/tx/${machineSpend.txHash}?cluster=devnet`
+                          : undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mono"
+                        style={{ color: machineSpend.txHash && !machineSpend.mock ? "var(--accent-deep)" : undefined, textDecoration: machineSpend.txHash && !machineSpend.mock ? "underline" : undefined }}
+                      >
+                        {maskId(machineSpend.txHash)}
+                      </a>
+                      &middot; {machineSpend.mock ? "x402 MOCK — no funds moved" : "x402 SOLANA DEVNET — test tokens, no real money"}
                     </div>
                   </div>
                 )}
@@ -1290,8 +1305,8 @@ function TrustDrawer({
                   </div>
                   <div className="provider-row">
                     <span className="prov-name">x402 / Solana</span>
-                    <span className="prov-detail">demo settlement</span>
-                    <span className="prov-mode mock">MOCK</span>
+                    <span className="prov-detail">{indicators.x402 === "devnet" ? "Devnet USDC settlement via x402 facilitator" : "Mock settlement — no funds moved"}</span>
+                    <span className={`prov-mode ${indicators.x402 === "devnet" ? "devnet" : "mock"}`}>{indicators.x402 === "devnet" ? "DEVNET" : "MOCK"}</span>
                   </div>
                   <div className="provider-row">
                     <span className="prov-name">LLM</span>

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { formatMinor, type ProductMatch } from "@agentready/catalog";
 import { getServices, type RecommendationBinding, type RespondResult } from "../../../lib/services";
-import { DEFAULT_MACHINE_SPEND } from "../../../lib/machine";
-import { formatX402Amount } from "@agentready/payments";
 
 export const runtime = "nodejs";
 
@@ -195,11 +193,19 @@ export async function GET() {
       transcript,
       machineSpend: session.machineSpend
         ? {
-            mock: true,
+            mock: session.machineSpend.settlementMode === "mock",
             paymentIdentifier: session.machineSpend.paymentIdentifier,
             txHash: session.machineSpend.settlementHash,
-            network: DEFAULT_MACHINE_SPEND.network,
-            amount: formatX402Amount(DEFAULT_MACHINE_SPEND.amountMinor),
+            network: session.machineSpend.network,
+            amount: session.machineSpend.amount,
+            requestDigest: session.machineSpend.requestDigest,
+            payer: session.machineSpend.payer,
+            payee: session.machineSpend.payee,
+            feePayer: session.machineSpend.feePayer,
+            memoVerification: session.machineSpend.memoVerification,
+            transferVerification: session.machineSpend.transferVerification,
+            transfer: session.machineSpend.transfer,
+            explorerUrl: session.machineSpend.explorerUrl,
           }
         : undefined,
       fitScores: session.machineSpend?.fitScores,

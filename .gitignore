@@ -10,3 +10,12 @@ test-results/
 .DS_Store
 *.log
 data/
+certificates/
+*.pem
+*.key
+logs/
+backups/
+
+# x402 Devnet burner keypair files (NEVER commit wallet secrets)
+*-keypair.json
+*-keypair.*.json

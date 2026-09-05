@@ -1,0 +1,26 @@
+diff --git a/dist/cjs/exact/client/index.js b/dist/cjs/exact/client/index.js
+index e85e7194623654b5778574d3b8965b3ea8957246..955cd1800047a774f0e1dcbab22645cb6e545488 100644
+--- a/dist/cjs/exact/client/index.js
++++ b/dist/cjs/exact/client/index.js
+@@ -308,7 +308,7 @@ var ExactSvmScheme = class {
+       (tx2) => (0, import_compute_budget.setTransactionMessageComputeUnitPrice)(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx2),
+       (tx2) => (0, import_kit2.setTransactionMessageFeePayer)(feePayer, tx2),
+       (tx2) => (0, import_kit2.prependTransactionMessageInstruction)(
+-        (0, import_compute_budget.getSetComputeUnitLimitInstruction)({ units: DEFAULT_COMPUTE_UNIT_LIMIT }),
++        (0, import_compute_budget.getSetComputeUnitLimitInstruction)({ units: 50000 }),
+         tx2
+       ),
+       (tx2) => (0, import_kit2.appendTransactionMessageInstructions)([transferIx, memoIx], tx2),
+diff --git a/dist/esm/chunk-NZSW4QBX.mjs b/dist/esm/chunk-NZSW4QBX.mjs
+index 594784ce6cdf1eac324084fe52b61f2d874bf848..f478007c71fd7a183d51c27820f488619f7b35e0 100644
+--- a/dist/esm/chunk-NZSW4QBX.mjs
++++ b/dist/esm/chunk-NZSW4QBX.mjs
+@@ -115,7 +115,7 @@ var ExactSvmScheme = class {
+       (tx2) => setTransactionMessageComputeUnitPrice(DEFAULT_COMPUTE_UNIT_PRICE_MICROLAMPORTS, tx2),
+       (tx2) => setTransactionMessageFeePayer(feePayer, tx2),
+       (tx2) => prependTransactionMessageInstruction(
+-        getSetComputeUnitLimitInstruction({ units: DEFAULT_COMPUTE_UNIT_LIMIT }),
++        getSetComputeUnitLimitInstruction({ units: 50000 }),
+         tx2
+       ),
+       (tx2) => appendTransactionMessageInstructions([transferIx, memoIx], tx2),

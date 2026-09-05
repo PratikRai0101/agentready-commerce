@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
+import { getMachineResourceMode } from "@/lib/machine";
 
 export const runtime = "nodejs";
 
@@ -13,7 +14,7 @@ export async function POST() {
     rails: services.registry.all().map((adapter) => ({ rail: adapter.rail, isMock: adapter.isMock })),
     indicators: {
       razorpay: services.razorpayMode,
-      x402: "mock",
+      x402: getMachineResourceMode(),
       llm: services.llm.enabled ? services.llm.name : "disabled",
     },
   });

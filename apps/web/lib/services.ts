@@ -21,7 +21,21 @@ import {
   type PurchaseIntent,
   type PurchaseMandate,
 } from "@agentready/domain";
-import { createAdapterRegistry, razorpaySignature, type AdapterRegistry, type PaymentAttempt, type VerificationResult } from "@agentready/payments";
+import {
+  buildDevnetToolSpendRequest,
+  canonicalToolSpendRequestDigest,
+  createAdapterRegistry,
+  formatX402Amount,
+  loadX402Config,
+  razorpaySignature,
+  type AdapterRegistry,
+  type PaymentAttempt,
+  type ToolSpendRequest,
+  type VerificationResult,
+  type X402DevnetConfig,
+  type DevnetTransferEvidence,
+  type TransferVerificationState,
+} from "@agentready/payments";
 import {
   createOperationCoordinator,
   MemoryOperationStore,
@@ -29,6 +43,7 @@ import {
 } from "@agentready/core";
 import { intentDigest, SIZES, type ParsedIntent } from "./intent";
 import { DEFAULT_MACHINE_SPEND, DemoMachineResource, runMachineSpend, type FitScore } from "./machine";
+import type { DevnetMachineResource } from "@agentready/payments/devnet-machine";
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
 import { createDialogueMemory, syncMemory, invalidateQuote, invalidateRecommendations, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
@@ -39,6 +54,27 @@ export type RecommendationBinding = {
   recommendationVersion: number;
   recommendationActionToken: string;
 };
+
+export type MachineSpendAttemptStatus =
+  | "pending"
+  | "settled"
+  | "manual_reconciliation_required"
+  | "rejected";
+
+export type MachineSpendAttempt = {
+  paymentIdentifier: string;
+  requestDigest: string;
+  spendingRequest: ToolSpendRequest;
+  signedAttempt: string;
+  status: MachineSpendAttemptStatus;
+  retryable: boolean;
+  lastError?: string;
+};
+
+export type MachineSpendAttemptSummary = Pick<
+  MachineSpendAttempt,
+  "paymentIdentifier" | "requestDigest" | "status" | "retryable"
+>;
 
 export type Session = {
   logicalOrderId: string;
@@ -53,7 +89,24 @@ export type Session = {
   externalPaymentId?: string;
   verification?: VerificationResult;
   compensation?: { refundId?: string; reason?: string; ok: boolean };
-  machineSpend?: { paymentIdentifier: string; settlementHash: string; fitScores: FitScore[] };
+  machineSpendAttempt?: MachineSpendAttempt;
+  machineSpend?: {
+    paymentIdentifier: string;
+    settlementHash: string;
+    fitScores: FitScore[];
+    requestDigest: string;
+    network: string;
+    asset: string;
+    amount: string;
+    payer: string;
+    payee: string;
+    feePayer: string;
+    memoVerification: string;
+    transferVerification: TransferVerificationState;
+    transfer?: DevnetTransferEvidence;
+    explorerUrl: string;
+    settlementMode: "mock" | "devnet";
+  };
   heldWebhook?: { eventId: string; paymentId: string; orderId: string };
   dialogue: DialogueMemory;
 };
@@ -69,7 +122,7 @@ export type EnvelopeRecord = {
 
 export type RespondResult =
   | { kind: "clarify"; message: string; questions: string[]; quickReplies: string[]; state: OrderState; parsedIntent?: ParsedIntent }
-  | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; state: OrderState; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
+  | ({ kind: "shortlist"; message: string; matches: ProductMatch[]; fitScores?: FitScore[]; machineSpend?: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string }; machineSpendAttempt?: MachineSpendAttemptSummary; state: OrderState; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } } & RecommendationBinding & { selectionRejected?: boolean; rejectedProductId?: string })
   | { kind: "error"; message: string; state: OrderState; matches?: ProductMatch[]; intentVersion?: number; recommendationVersion?: number; recommendationActionToken?: string; selectionRejected?: boolean; rejectedProductId?: string; parsedIntent?: { size?: string; colour?: string; useCase?: string; maxAmountMinor?: number; mustBeReturnable?: boolean; distanceKm?: number; fit?: string; cushioning?: string } }
   | { kind: "compare"; productA: ProductMatch; productB: ProductMatch; facts: { strengths: string[]; differences: string[]; compromises: string[] }; state: OrderState }
   | { kind: "explain"; match: ProductMatch; explanation: string; state: OrderState }
@@ -367,15 +420,17 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
       // A repeated constraint message is a no-op. Keep the server-issued
       // result binding stable instead of manufacturing a new ranking.
-      if (!materialChange && (merged.action === "search" || merged.action === "refine") && isCurrentRecommendation(session) && session.lastRanking?.ranked) {
+      const hasPendingMachineSpend = session.machineSpendAttempt?.status === "pending" && session.machineSpendAttempt.retryable;
+      if (!materialChange && (merged.action === "search" || merged.action === "refine") && isCurrentRecommendation(session) && session.lastRanking?.ranked && !hasPendingMachineSpend) {
         const ranking = session.lastRanking!;
-        const replyMessage = await composeShortlistMessage(session, ranking, undefined, llm);
+        const replyMessage = await composeShortlistMessage(session, ranking, undefined, llm, machineSpendAttemptSummary(session));
         syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), [], merged.action, message);
         const repeatResult: RespondResult = {
           kind: "shortlist",
           message: replyMessage,
           matches: ranking.matches,
           fitScores: session.machineSpend?.fitScores,
+          machineSpendAttempt: machineSpendAttemptSummary(session),
           state: session.state,
           parsedIntent: { ...session.intent },
           ...recommendationBinding(session),
@@ -428,13 +483,18 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       // distinguish candidates; (2) at least 2 eligible candidates remain;
       // (3) no duplicate spend on the same intent digest.
       const envelopeHash = intentDigest(session.intent);
+      const hasExistingMachineSpendAttempt = Boolean(
+        session.machineSpendAttempt && session.machineSpendAttempt.status !== "rejected",
+      );
       const shouldSpend = session.intent.fit
         && !session.machineSpend
-        && ranking.matches.length >= 2
-        && !machineResource.hasProcessed(envelopeHash);
+        && (
+          session.machineSpendAttempt?.status === "pending"
+          || (!hasExistingMachineSpendAttempt && ranking.matches.length >= 2 && !machineResource.hasProcessed(envelopeHash))
+        );
       const machineSpend = shouldSpend
-        ? runFitScoreSpend(session, machineResource, audit, orderId) : undefined;
-      const replyMessage = await composeShortlistMessage(session, ranking, machineSpend, llm);
+        ? await runFitScoreSpend(session, machineResource, audit, orderId) : undefined;
+      const replyMessage = await composeShortlistMessage(session, ranking, machineSpend, llm, machineSpendAttemptSummary(session));
       void audit.log({ logicalOrderId: orderId, type: "intent.shortlist_ranked", actor: "agent",
         summary: `Ranked ${ranking.matches.length} products for ${intentDigest(session.intent)}`,
         inputDigest: intentDigest(session.intent) });
@@ -447,6 +507,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         matches: ranking.matches,
         fitScores: session.machineSpend?.fitScores,
         machineSpend: machineSpend ? { mock: machineSpend.mock, paymentIdentifier: machineSpend.paymentIdentifier, txHash: machineSpend.txHash, network: machineSpend.network, amount: machineSpend.amount } : undefined,
+        machineSpendAttempt: machineSpendAttemptSummary(session),
         state: session.state,
         parsedIntent: { ...session.intent },
         ...recommendationBinding(session),
@@ -1379,13 +1440,16 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         // Re-rank products with the new intent
         if (session.state === "AWAITING_APPROVAL" && materialChange) {
           setState(session, "QUOTED");
-        } else if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED" && session.state !== "DRAFT" && session.state !== "CLARIFYING") {
+        } else if (session.state === "APPROVED" && materialChange) {
+          setState(session, "REAPPROVAL_REQUIRED");
+        } else if (session.state !== "AWAITING_APPROVAL" && session.state !== "REAPPROVAL_REQUIRED" && session.state !== "DRAFT" && session.state !== "CLARIFYING" && session.state !== "APPROVED") {
           setState(session, "QUOTED");
         }
 
         const intent = buildPurchaseIntent(session);
         const ranking = rankProducts(intent, SHOE_CATALOG);
         recordRecommendation(session, ranking);
+        syncMemory(session.dialogue, session.intent, ranking.matches.map((m) => m.product.productId), ranking.missing.map((m) => m.name), "intent_patch", Object.keys(patch).join(","));
 
         if (!ranking.ranked) {
           // State may not allow CLARIFYING transition; set directly
@@ -1955,14 +2019,302 @@ function servicesReconcileHeld(
   });
 }
 
-function runFitScoreSpend(
+type AuditLogInput = Parameters<ReturnType<typeof createAuditLedger>["log"]>[0];
+
+async function logMachineSpendAuditOnce(
+  audit: ReturnType<typeof createAuditLedger>,
+  input: AuditLogInput,
+): Promise<void> {
+  try {
+    const paymentIdentifier = input.externalReferences?.paymentIdentifier;
+    const requestDigest = input.externalReferences?.requestDigest ?? input.inputDigest;
+    if (paymentIdentifier && requestDigest) {
+      const existing = await audit.timeline(input.logicalOrderId);
+      const alreadyRecorded = existing.some((event) => event.type === input.type
+        && event.externalReferences?.paymentIdentifier === paymentIdentifier
+        && (event.externalReferences?.requestDigest ?? event.inputDigest) === requestDigest);
+      if (alreadyRecorded) return;
+    }
+    await audit.log(input);
+  } catch {
+    // Payment outcomes must not become HTTP failures because an audit
+    // projection is temporarily unavailable.
+    console.error("machine spend audit append failed");
+  }
+}
+
+async function runFitScoreSpend(
   session: Session,
   resource: DemoMachineResource,
   audit: ReturnType<typeof createAuditLedger>,
   orderId: string,
-): { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string } | undefined {
+): Promise<{ mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string } | undefined> {
+  const x402Config = loadX402Config();
+  const mode = x402Config.mode;
+
+  if (mode === "devnet") {
+    const devnetConfig = x402Config as X402DevnetConfig;
+    let devnetResource: DevnetMachineResource;
+    try {
+      const machine = await import("./machine");
+      devnetResource = machine.getDevnetMachineResource();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      await logMachineSpendAuditOnce(audit, {
+        logicalOrderId: orderId,
+        type: "machine.spend_failed",
+        actor: "agent",
+        summary: `Premium fit-score devnet resource unavailable: ${errorMsg}`,
+        decision: "review",
+        reasonCodes: ["x402_store_unavailable"],
+      });
+      return undefined;
+    }
+    const currentRequest = buildDevnetToolSpendRequest(devnetConfig, orderId, session.dialogue.intentVersion);
+    const currentDigest = canonicalToolSpendRequestDigest(currentRequest);
+
+    // Durable source of truth. session.machineSpendAttempt below is a UI/policy
+    // cache mirror only — settlement decisions always re-read the store.
+    const storedActive = await devnetResource.findActiveAttempt(orderId, session.dialogue.intentVersion);
+    const existingAttempt = storedActive
+      ? {
+          paymentIdentifier: storedActive.callerPaymentId ?? "",
+          requestDigest: storedActive.requestDigest,
+          spendingRequest: { ...currentRequest },
+          signedAttempt: storedActive.signedPayloadEnc
+            ? await devnetResource.decryptStoredPayload(storedActive.signedPayloadEnc)
+            : "",
+          lastError: undefined as string | undefined,
+          status:
+            storedActive.status === "settled"
+              ? ("settled" as const)
+              : storedActive.status === "manual" || storedActive.status === "mismatch"
+                ? ("manual_reconciliation_required" as const)
+                : storedActive.status === "rejected" || storedActive.status === "released"
+                  ? ("rejected" as const)
+                  : ("pending" as const),
+          retryable: storedActive.status === "pending" || storedActive.status === "settling" || storedActive.status === "awaiting_evidence",
+        }
+      : undefined;
+
+    if (existingAttempt?.status === "manual_reconciliation_required") return undefined;
+    if (existingAttempt?.status === "pending" && !existingAttempt.retryable) {
+      existingAttempt.status = "manual_reconciliation_required";
+      return undefined;
+    }
+
+    if (existingAttempt && existingAttempt.requestDigest !== currentDigest) {
+      existingAttempt.status = "manual_reconciliation_required";
+      existingAttempt.retryable = false;
+      existingAttempt.lastError = "The intent changed while the original tool-payment attempt was unresolved. Manual reconciliation is required; no replacement payment will be submitted.";
+      await logMachineSpendAuditOnce(audit, {
+        logicalOrderId: orderId,
+        type: "machine.spend_manual_reconciliation",
+        actor: "agent",
+        summary: existingAttempt.lastError,
+        externalReferences: {
+          paymentIdentifier: existingAttempt.paymentIdentifier,
+          requestDigest: existingAttempt.requestDigest,
+        },
+        decision: "review",
+        reasonCodes: ["x402_manual_reconciliation_required", "x402_material_request_changed"],
+      });
+      return undefined;
+    }
+
+    const paymentIdentifier = existingAttempt?.paymentIdentifier || newId("pid");
+    const requestDigest = existingAttempt?.requestDigest ?? currentDigest;
+    const spendingRequest = existingAttempt?.spendingRequest ?? currentRequest;
+    let outcome: Awaited<ReturnType<typeof import("./machine").runDevnetMachineSpend>>;
+    let persistedAttempt = existingAttempt;
+    const wasPending = existingAttempt?.status === "pending";
+    try {
+      const { prepareDevnetMachineSpend, runDevnetMachineSpend } = await import("./machine");
+      const preparedAttempt = existingAttempt && existingAttempt.status === "pending" && existingAttempt.signedAttempt
+        ? {
+            paymentIdentifier: existingAttempt.paymentIdentifier,
+            requestDigest: existingAttempt.requestDigest,
+            spendingRequest: { ...existingAttempt.spendingRequest },
+            encodedPayment: existingAttempt.signedAttempt,
+          }
+        : await prepareDevnetMachineSpend(spendingRequest, paymentIdentifier, session.approvalEventId);
+
+      if (!persistedAttempt) {
+        persistedAttempt = {
+          paymentIdentifier: preparedAttempt.paymentIdentifier,
+          requestDigest: preparedAttempt.requestDigest,
+          spendingRequest: { ...preparedAttempt.spendingRequest },
+          signedAttempt: preparedAttempt.encodedPayment,
+          status: "pending",
+          retryable: true,
+          lastError: undefined,
+        };
+      }
+      // Refresh the session cache mirror from durable truth (never the reverse).
+      session.machineSpendAttempt = persistedAttempt;
+
+      const appOrigin = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+      outcome = await runDevnetMachineSpend(spendingRequest, appOrigin, paymentIdentifier, preparedAttempt, session.approvalEventId);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      if (persistedAttempt) {
+        persistedAttempt.status = "manual_reconciliation_required";
+        persistedAttempt.retryable = false;
+        persistedAttempt.lastError = `Tool-payment processing failed after the signed attempt was retained. Manual reconciliation is required; no replacement payment will be submitted. ${errorMsg}`;
+        await logMachineSpendAuditOnce(audit, {
+          logicalOrderId: orderId,
+          type: "machine.spend_manual_reconciliation",
+          actor: "agent",
+          summary: persistedAttempt.lastError,
+          externalReferences: {
+            paymentIdentifier: persistedAttempt.paymentIdentifier,
+            requestDigest: persistedAttempt.requestDigest,
+          },
+          decision: "review",
+          reasonCodes: ["x402_manual_reconciliation_required", "x402_devnet_spend_error"],
+        });
+      } else {
+        await logMachineSpendAuditOnce(audit, {
+          logicalOrderId: orderId,
+          type: "machine.spend_failed",
+          actor: "agent",
+          summary: `Premium fit-score devnet spend failed before the signed attempt was retained: ${errorMsg}`,
+          decision: "review",
+          reasonCodes: ["x402_devnet_spend_error"],
+        });
+      }
+      return undefined;
+    }
+
+    if (!outcome.ok || !outcome.settlement || !outcome.resource) {
+      const unresolved = outcome.pending === true
+        || outcome.reconciliationState === "pending"
+        || outcome.reconciliationState === "manual_reconciliation_required";
+      if (persistedAttempt && unresolved) {
+        const reconciliationState = outcome.reconciliationState === "pending" && outcome.retryable !== false
+          ? "pending"
+          : "manual_reconciliation_required";
+        persistedAttempt.status = reconciliationState;
+        persistedAttempt.retryable = outcome.retryable ?? reconciliationState === "pending";
+        persistedAttempt.lastError = outcome.error;
+        await logMachineSpendAuditOnce(audit, {
+          logicalOrderId: orderId,
+          type: reconciliationState === "pending" ? "machine.spend_pending" : "machine.spend_manual_reconciliation",
+          actor: "agent",
+          summary: reconciliationState === "pending"
+            ? `Premium fit-score settlement is pending. The original signed attempt ${persistedAttempt.paymentIdentifier} is retained for reconciliation; no replacement payment will be submitted.`
+            : `Premium fit-score settlement is unresolved. No transaction signature or automatic discovery path is available; manual reconciliation is required and no replacement payment will be submitted.`,
+          externalReferences: {
+            paymentIdentifier: persistedAttempt.paymentIdentifier,
+            requestDigest: persistedAttempt.requestDigest,
+          },
+          decision: "review",
+          reasonCodes: reconciliationState === "pending"
+            ? ["x402_settlement_pending", "x402_original_attempt_retained"]
+            : ["x402_manual_reconciliation_required", "x402_original_attempt_retained"],
+        });
+      } else {
+        if (persistedAttempt) {
+          persistedAttempt.status = "rejected";
+          persistedAttempt.retryable = false;
+          persistedAttempt.lastError = outcome.error;
+        }
+        await logMachineSpendAuditOnce(audit, {
+          logicalOrderId: orderId,
+          type: "machine.spend_failed",
+          actor: "agent",
+          summary: `Premium fit-score devnet resource rejected payment: ${outcome.error ?? "unknown"}`,
+          decision: "review",
+          reasonCodes: ["x402_payment_rejected"],
+        });
+      }
+      return undefined;
+    }
+
+    if (persistedAttempt) {
+      persistedAttempt.status = "settled";
+      persistedAttempt.retryable = false;
+      persistedAttempt.lastError = undefined;
+    }
+    const storedPaymentIdentifier = persistedAttempt?.paymentIdentifier ?? paymentIdentifier;
+    const storedRequestDigest = persistedAttempt?.requestDigest ?? requestDigest;
+    session.machineSpend = {
+      paymentIdentifier: storedPaymentIdentifier,
+      settlementHash: outcome.settlement.transactionHash ?? "",
+      fitScores: outcome.resource.scores,
+      requestDigest: storedRequestDigest,
+      network: outcome.settlement.network,
+      asset: outcome.settlementEvidence?.asset ?? devnetConfig.devnetUsdcMint,
+      amount: outcome.settlement.amount,
+      payer: outcome.settlementEvidence?.payer ?? "",
+      payee: outcome.settlementEvidence?.payee ?? "",
+      feePayer: outcome.settlementEvidence?.feePayer ?? "",
+      memoVerification: outcome.settlementEvidence?.memoVerification ?? "unavailable",
+      transferVerification: outcome.settlementEvidence?.transferVerification ?? "unavailable",
+      transfer: outcome.settlementEvidence?.transfer,
+      explorerUrl: outcome.settlementEvidence?.explorerUrl ?? "",
+      settlementMode: "devnet",
+    };
+
+    await logMachineSpendAuditOnce(audit, {
+      logicalOrderId: orderId,
+      type: "machine.paid_resource",
+      actor: "agent",
+      summary: `Fit-scoring invoked under x402 SOLANA DEVNET settlement — test tokens, no real money.`,
+      externalReferences: {
+        network: outcome.settlement.network,
+        paymentIdentifier: storedPaymentIdentifier,
+        txHash: outcome.settlement.transactionHash ?? "",
+        feePayer: outcome.settlementEvidence?.feePayer ?? "",
+        payee: outcome.settlementEvidence?.payee ?? "",
+        asset: outcome.settlementEvidence?.asset ?? "",
+        amount: outcome.settlement.amount,
+        mock: "false",
+        purpose: "fit_scoring",
+        mandateMaximum: `${formatX402Amount(devnetConfig.amountMinor)} USDC`,
+        requestedAmount: `${formatX402Amount(Number(outcome.settlement.amount))} USDC`,
+        settlementMode: "devnet",
+        requestDigest: storedRequestDigest,
+        invocationStatus: "success",
+        replayDedupStatus: wasPending ? "reconciled_original_attempt" : "first_invocation",
+        explorerUrl: outcome.settlementEvidence?.explorerUrl ?? "",
+        memoVerification: outcome.settlementEvidence?.memoVerification ?? "unavailable",
+        transferVerification: outcome.settlementEvidence?.transferVerification ?? "unavailable",
+        transferMint: outcome.settlementEvidence?.transfer?.mint ?? "",
+        transferAmount: outcome.settlementEvidence?.transfer?.amount ?? "",
+        transferRecipient: outcome.settlementEvidence?.transfer?.recipient ?? "",
+        transferPayer: outcome.settlementEvidence?.transfer?.payer ?? "",
+      },
+      decision: "allow",
+      reasonCodes: [
+        wasPending ? "x402_devnet_settlement_reconciled" : "x402_devnet_settlement_verified",
+        "machine_tool_spend",
+      ],
+    });
+
+    return {
+      mock: false,
+      paymentIdentifier: storedPaymentIdentifier,
+      txHash: outcome.settlement.transactionHash ?? "",
+      network: outcome.settlement.network,
+      amount: outcome.settlement.amount,
+    };
+  }
+
+  // Mock mode (default)
   const envelopeHash = intentDigest(session.intent);
   const paymentIdentifier = newId("pid");
+  const spendingRequest: ToolSpendRequest = {
+    orderId,
+    intentVersion: session.dialogue.intentVersion,
+    resource: "/api/resources/premium-fit-score",
+    amountMinor: DEFAULT_MACHINE_SPEND.amountMinor,
+    network: DEFAULT_MACHINE_SPEND.network,
+    asset: "USDC",
+    payee: DEFAULT_MACHINE_SPEND.payeeWallet,
+    purpose: "fit_scoring",
+  };
+  const requestDigest = canonicalToolSpendRequestDigest(spendingRequest);
   const outcome = runMachineSpend(resource, envelopeHash, paymentIdentifier);
   if (!outcome.ok || !outcome.settlement || !outcome.resource) {
     void audit.log({
@@ -1979,23 +2331,37 @@ function runFitScoreSpend(
     paymentIdentifier,
     settlementHash: outcome.settlement.transactionHash ?? "",
     fitScores: outcome.resource.scores,
+    requestDigest,
+    network: outcome.settlement.network,
+    asset: DEFAULT_MACHINE_SPEND.usdcMint,
+    amount: outcome.settlement.amount,
+    payer: outcome.settlement.payer,
+    payee: DEFAULT_MACHINE_SPEND.payeeWallet,
+    feePayer: "unavailable (mock)",
+    memoVerification: "unavailable",
+    transferVerification: "unavailable",
+    explorerUrl: "",
+    settlementMode: "mock",
   };
   void audit.log({
     logicalOrderId: orderId,
     type: "machine.paid_resource",
     actor: "agent",
-    summary: `Fit-scoring invoked under a pre-authorized ${DEFAULT_MACHINE_SPEND.amountMinor / 1_000_000} USDC x402 mandate — MOCK settlement; no real funds moved.`,
+    summary: `Fit-scoring invoked under a pre-authorized ${formatX402Amount(DEFAULT_MACHINE_SPEND.amountMinor)} USDC x402 mandate — MOCK settlement; no real funds moved.`,
     externalReferences: {
       network: outcome.settlement.network,
       paymentIdentifier,
       txHash: outcome.settlement.transactionHash ?? "",
+      feePayer: "unavailable (mock)",
       payee: DEFAULT_MACHINE_SPEND.payeeWallet,
+      asset: DEFAULT_MACHINE_SPEND.usdcMint,
+      amount: outcome.settlement.amount,
       mock: "true",
       purpose: "fit_scoring",
-      mandateMaximum: `${DEFAULT_MACHINE_SPEND.amountMinor / 1_000_000} USDC`,
-      requestedAmount: `${outcome.settlement.amount} USDC`,
+      mandateMaximum: `${formatX402Amount(DEFAULT_MACHINE_SPEND.amountMinor)} USDC`,
+      requestedAmount: `${formatX402Amount(Number(outcome.settlement.amount))} USDC`,
       settlementMode: "mock",
-      requestDigest: envelopeHash,
+      requestDigest,
       invocationStatus: "success",
       replayDedupStatus: "first_invocation",
     },
@@ -2015,6 +2381,17 @@ function SHA256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function machineSpendAttemptSummary(session: Session): MachineSpendAttemptSummary | undefined {
+  const attempt = session.machineSpendAttempt;
+  if (!attempt || attempt.status === "settled") return undefined;
+  return {
+    paymentIdentifier: attempt.paymentIdentifier,
+    requestDigest: attempt.requestDigest,
+    status: attempt.status,
+    retryable: attempt.retryable,
+  };
+}
+
 function composeClarification(session: Session, missingNames: string[]): string {
   const partial = [];
   if (session.intent.colour) partial.push(`colour ${session.intent.colour}`);
@@ -2031,6 +2408,7 @@ async function composeShortlistMessage(
   ranking: RankingResult,
   machineSpend: { mock: boolean; paymentIdentifier: string; txHash: string; network: string; amount: string } | undefined,
   llm: LlmProvider,
+  machineSpendAttempt: MachineSpendAttemptSummary | undefined,
 ): Promise<string> {
   const best = ranking.matches[0];
   if (!best) {
@@ -2040,8 +2418,14 @@ async function composeShortlistMessage(
       : "No products satisfy your constraints with current stock.";
   }
   const spendNote = machineSpend
-    ? ` Fit-scoring invoked under a pre-authorized ${machineSpend.amount} USDC x402 mandate — MOCK settlement; no real funds moved.`
-    : "";
+    ? machineSpend.mock
+      ? ` Fit-scoring invoked under a pre-authorized ${machineSpend.amount} USDC x402 mandate — MOCK settlement; no real funds moved.`
+      : ` Fit-scoring invoked under x402 SOLANA DEVNET settlement — test tokens, no real money.`
+    : machineSpendAttempt?.status === "pending"
+      ? " Fit-scoring settlement is pending. The original signed payment attempt is retained and will be reconciled without submitting a replacement."
+      : machineSpendAttempt?.status === "manual_reconciliation_required"
+        ? " Fit-scoring settlement is unresolved and requires manual reconciliation. No replacement payment will be submitted."
+        : "";
   if (llm.enabled) {
     const explanation = await llm.explainRecommendation({
       message: session.message,
