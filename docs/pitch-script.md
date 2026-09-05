@@ -30,7 +30,7 @@ the two missing requirements, size and use."
 
 ## 1:05 to 1:50 | The shortlist
 
-"I choose UK 9, road running, wide fit and maximum cushioning. RunVista returns
+"I choose UK 9, road running, wide fit and cushioning. RunVista returns
 three choices, not one unsupported winner. Max Cushion at ₹4,899 is the closest
 match. Streak 4 at ₹4,299 is cheaper. Stride Lite at ₹3,499 has a clear trade-off.
 Every product fact comes from the catalog.
@@ -45,7 +45,7 @@ read-only, with no resubmission. Its signature begins `5FQb8Jh7`."
 ## 1:50 to 2:30 | Exact approval
 
 "I select Max Cushion, UK 9, SKU VMAX-BLK-9. RunVista freezes a Commerce Envelope
-with the merchant, SKU, variant, quantity, subtotal, ₹49 shipping, total, return
+with merchant, SKU, variant, quantity, subtotal, ₹49 shipping, total, return
 terms, inventory hold, mandate and expiry.
 
 Approval attaches to its SHA-256 hash. If a material field changes, the approval
@@ -60,8 +60,8 @@ expiry. The model interprets and explains, but cannot move money. I click
 "One order gets one payment rail. I click 'Choose payment method':
 'Razorpay Checkout' mints a mock `order_MOCK_*`; 'Agent Pay with x402' shows the
 network, asset, exact amount, recipient and digests for a Solana Devnet
-simulation to confirm. No funds move either way, and the service layer blocks
-whichever rail loses.
+simulation that settles automatically with no second approval. No funds move,
+and the service layer blocks whichever rail loses.
 
 Our separate August and September evidence covers three Razorpay Test Mode
 checkouts. Two `payment.captured` webhooks passed raw-body HMAC verification and
@@ -101,6 +101,6 @@ Vulcan could make that payment intelligence smarter in future. It is not
 integrated here. UPI Reserve Pay is also outside this build because we did not
 have official access. UPI remains a method in Razorpay Checkout.
 
-The catalog is synthetic. The public demo is mock-only. Test Mode and Devnet are
+The catalog is synthetic. The demo is mock-only. Test Mode and Devnet are
 recorded evidence. The rule is simple: no silent cart change, no second charge
 and no fulfilment until the payment is verified."

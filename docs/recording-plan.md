@@ -96,7 +96,7 @@
      (`POST /api/pay/mock-capture` → verify).
   3. Show `order_MOCK_*` / `pay_MOCK_*` IDs + “signature verified”.
   (Alternate take: choose “Agent Pay with x402”, review network/asset/amount/
-  recipient/digests, click “Confirm mock payment — no funds moved”.)
+  recipient/digests as it settles automatically with no second approval.)
 - Capture: modal cards, payment panel + drawer `payment.verified` event.
 - Narration: pitch-script §2:30–3:10 first paragraph. Caption: “Mock order —
   no funds moved.”

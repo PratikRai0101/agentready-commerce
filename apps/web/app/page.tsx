@@ -583,7 +583,7 @@ export default function HomePage() {
     setOrderState(data.state);
     if (data.ok && data.payment) {
       setX402Order(data.payment);
-      pushAgent(`Agent Pay prepared: ${data.payment.paymentIdentifier} for ${(data.payment.amountMinor / 100).toFixed(2)} ${data.payment.currency} (Solana Devnet simulation, no funds moved). Review and confirm.`);
+      pushAgent(`Agent Pay prepared: ${data.payment.paymentIdentifier} for ${(data.payment.amountMinor / 100).toFixed(2)} ${data.payment.currency} (Solana Devnet simulation — no funds moved). Settling automatically.`);
     } else {
       pushAgent(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
       setNotice(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
@@ -1100,6 +1100,7 @@ function PaymentControls({
   const [modalOpen, setModalOpen] = useState(false);
   const [rail, setRail] = useState<"razorpay" | "x402" | null>(null);
   const [boundDigest, setBoundDigest] = useState<string | null>(null);
+  const autoSettledRef = useRef<string | null>(null);
 
   const paid = ["PAID_VERIFIED", "FULFILMENT_PENDING", "FULFILLED", "FULFILMENT_FAILED", "COMPENSATION_PENDING", "REFUNDED"].includes(orderState);
   useEffect(() => {
@@ -1108,6 +1109,17 @@ function PaymentControls({
   const selectionStale = rail !== null && (approvedDigest === null || boundDigest !== approvedDigest);
   const razorpayStarted = Boolean(paymentIds?.orderId);
   const x402Verified = x402Order?.status === "verified";
+  const x402PendingCurrent = x402Order?.status === "pending" && x402Order.envelopeDigest === approvedDigest;
+
+  // Rail selection is the single human decision: once the x402 mock order is
+  // prepared, the 402 → signed payment → retry → verification → settlement
+  // simulation runs automatically. No second approval is requested.
+  useEffect(() => {
+    if (rail === "x402" && !selectionStale && x402PendingCurrent && !busy && autoSettledRef.current !== x402Order!.paymentIdentifier) {
+      autoSettledRef.current = x402Order!.paymentIdentifier;
+      onConfirmX402(x402Order!.paymentIdentifier);
+    }
+  }, [rail, selectionStale, x402PendingCurrent, busy, x402Order, onConfirmX402]);
 
   const chooseRail = (next: "razorpay" | "x402") => {
     setRail(next);
@@ -1133,7 +1145,7 @@ function PaymentControls({
       {x402Verified && x402Order && (
         <div style={{ fontSize: 12, color: "var(--good)", marginBottom: 8 }}>
           Agent Pay verified — <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.paymentIdentifier)}</span>
-          {" · "}Solana Devnet simulation, no funds moved
+          {" · "}Solana Devnet simulation — no funds moved.
           {x402Order.mockTxHash && (
             <> &middot; ref: <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.mockTxHash)}</span></>
           )}
@@ -1144,6 +1156,12 @@ function PaymentControls({
           <div style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 6 }}>
             <strong style={{ fontSize: 13 }}>Razorpay Checkout</strong>
             <span className="prov-mode mock">MOCK · TEST DEMO</span>
+            <span style={{ fontSize: 11, color: "var(--text-soft)" }}>Test Mode style — no real card needed</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+            {["UPI", "Card", "Netbanking"].map((m) => (
+              <span key={m} className="chip preference" style={{ cursor: "default" }}>{m}</span>
+            ))}
           </div>
           <div style={{ fontSize: 12, color: "var(--text-soft)", marginBottom: 8 }}>
             Order: <span style={{ fontFamily: "var(--mono)" }}>{maskId(paymentIds.orderId!)}</span>
@@ -1202,7 +1220,7 @@ function PaymentControls({
               <div style={{ display: "grid", gap: 10 }}>
                 <button
                   type="button" className="demo-panel" style={{ textAlign: "left", cursor: "pointer", borderLeftColor: "var(--accent)", borderLeftWidth: 3 }}
-                  onClick={() => chooseRail("razorpay")} disabled={busy || x402Verified}
+                  onClick={() => chooseRail("razorpay")} disabled={busy || x402Verified || x402PendingCurrent}
                 >
                   <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
                     <strong style={{ fontSize: 14 }}>Razorpay Checkout</strong>
@@ -1210,6 +1228,7 @@ function PaymentControls({
                   </div>
                   <div style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>
                     UPI, cards and net banking through the mock adapter. {totalLabel} · IDs like `order_MOCK_*` — no funds move.
+                    {x402PendingCurrent ? " Finish or abandon the pending Agent Pay first." : ""}
                   </div>
                 </button>
                 {x402Available ? (
@@ -1219,12 +1238,12 @@ function PaymentControls({
                   >
                     <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
                       <strong style={{ fontSize: 14 }}>Agent Pay with x402</strong>
-                      <span className="prov-mode mock">Solana Devnet simulation · no funds moved</span>
+                      <span className="prov-mode mock">Solana Devnet simulation — no funds moved.</span>
                     </div>
                     <div style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>
-                      {x402Order && x402Order.envelopeDigest === approvedDigest
-                        ? `Preparation ${maskId(x402Order.paymentIdentifier)} pending — resume to review and confirm.`
-                        : "Review network, asset, exact amount, recipient and digests before confirming."}
+                      {x402PendingCurrent
+                        ? `Settling ${maskId(x402Order!.paymentIdentifier)} automatically — no second approval.`
+                        : "Shows network, asset, exact amount, recipient and digests, then settles the mock automatically."}
                     </div>
                   </button>
                 ) : (
@@ -1248,23 +1267,31 @@ function PaymentControls({
                 {!x402Order || x402Order.envelopeDigest !== approvedDigest ? (
                   <p style={{ fontSize: 12, color: "var(--text-soft)" }}>Preparing the mock order payment…</p>
                 ) : (
-                  <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "4px 10px", fontSize: 12, marginBottom: 10 }}>
-                    <span style={{ color: "var(--text-soft)" }}>Network</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.network}</span>
-                    <span style={{ color: "var(--text-soft)" }}>Asset</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.asset}</span>
-                    <span style={{ color: "var(--text-soft)" }}>Exact amount</span><span>{(x402Order.amountMinor / 100).toFixed(2)} {x402Order.currency}</span>
-                    <span style={{ color: "var(--text-soft)" }}>Recipient</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.recipient}</span>
-                    <span style={{ color: "var(--text-soft)" }}>Request digest</span><code style={{ fontFamily: "var(--mono)", fontSize: 11, overflowWrap: "anywhere" }}>{x402Order.requestDigest}</code>
-                    <span style={{ color: "var(--text-soft)" }}>Payment ID</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{x402Order.paymentIdentifier}</code>
-                    <span style={{ color: "var(--text-soft)" }}>Envelope</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{`${x402Order.envelopeDigest.slice(0, 12)}…`} (approved)</code>
+                  <div>
+                    <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "4px 10px", fontSize: 12, marginBottom: 10 }}>
+                      <span style={{ color: "var(--text-soft)" }}>Network</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.network}</span>
+                      <span style={{ color: "var(--text-soft)" }}>Asset</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.asset} (mock USDC)</span>
+                      <span style={{ color: "var(--text-soft)" }}>Exact amount</span><span>₹{(x402Order.amountMinor / 100).toFixed(2)} {x402Order.currency} (mirrors approved envelope total)</span>
+                      <span style={{ color: "var(--text-soft)" }}>Recipient</span><span style={{ fontFamily: "var(--mono)" }}>{x402Order.recipient}</span>
+                      <span style={{ color: "var(--text-soft)" }}>Request digest</span><code style={{ fontFamily: "var(--mono)", fontSize: 11, overflowWrap: "anywhere" }}>{x402Order.requestDigest}</code>
+                      <span style={{ color: "var(--text-soft)" }}>Payment ID</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{x402Order.paymentIdentifier}</code>
+                      <span style={{ color: "var(--text-soft)" }}>Envelope</span><code style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{`${x402Order.envelopeDigest.slice(0, 12)}…`} (approved)</code>
+                    </div>
+                    <ol style={{ fontSize: 12, color: "var(--text-soft)", margin: "0 0 10px 18px", padding: 0 }}>
+                      {(x402Order.status === "verified"
+                        ? ["402 PAYMENT-REQUIRED", "Signed mock payment", "Retry with signature", "Verification", "Mock settlement"]
+                        : ["402 PAYMENT-REQUIRED", "Signed mock payment", "Retry with signature"]
+                      ).map((step) => (
+                        <li key={step}>✓ {step}</li>
+                      ))}
+                      {x402Order.status !== "verified" && <li>Settling mock payment…</li>}
+                    </ol>
+                    <p style={{ fontSize: 12, color: "var(--text-soft)" }}>
+                      Solana Devnet simulation — no funds moved. No second approval was requested.
+                    </p>
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button
-                    className="demo-btn primary" type="button" disabled={busy || !x402Order || x402Order.envelopeDigest !== approvedDigest || x402Order.status === "verified"}
-                    onClick={() => x402Order && onConfirmX402(x402Order.paymentIdentifier)}
-                  >
-                    Confirm mock payment — no funds moved
-                  </button>
                   <button className="demo-btn" type="button" onClick={() => setRail(null)} disabled={busy}>Back to methods</button>
                 </div>
               </div>

@@ -304,17 +304,17 @@ async function runViewport(label, viewport) {
   try {
     x402Id = (await prepareResp?.json())?.payment?.paymentIdentifier || '';
   } catch {}
-  await page.waitForTimeout(800);
+  // Read before auto-settlement closes the modal.
   const detailText = (((await page.locator('.drawer.open').first().textContent().catch(() => '')) || '').replace(/\s+/g, ' ')).trim();
   check(
     `${label}: x402 detail discloses terms before confirm`,
     x402Id.startsWith('x402ord_') && /Network/.test(detailText) && /Exact amount/.test(detailText) && /no funds moved/i.test(detailText),
     `${x402Id} ${detailText.slice(0, 80)}`,
   );
-  const [confirmResp] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/confirm'), { timeout: 10000 }).catch(() => null),
-    page.locator('button:has-text("Confirm mock payment")').first().click(),
-  ]);
+  // Rail selection auto-settles: no second approval click.
+  const confirmBtn = page.locator('button:has-text("Confirm mock payment")').first();
+  check(`${label}: x402 needs no second approval click`, (await confirmBtn.count()) === 0, '');
+  const confirmResp = await page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/confirm'), { timeout: 10000 }).catch(() => null);
   try {
     await confirmResp?.json();
   } catch {}
