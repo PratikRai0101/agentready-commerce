@@ -574,40 +574,21 @@ export default function HomePage() {
   const prepareX402Order = useCallback(async () => {
     if (!orderId) return;
     setBusy(true);
-    const response = await fetch("/api/pay/x402-order/prepare", {
+    // Single-request settlement: prepare + confirm run on one server, so the
+    // result never depends on state shared across serverless instances.
+    const response = await fetch("/api/pay/x402-order/settle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderId }),
     });
     const data = await response.json();
     setOrderState(data.state);
-    if (data.ok && data.payment) {
-      setX402Order(data.payment);
-      pushAgent(`Agent Pay prepared: ${data.payment.paymentIdentifier} for ${(data.payment.amountMinor / 100).toFixed(2)} ${data.payment.currency} (Solana Devnet simulation — no funds moved). Settling automatically.`);
+    if (data.payment) setX402Order(data.payment);
+    if (data.ok) {
+      pushAgent(`Agent Pay verified: ${data.payment.paymentIdentifier} (Solana Devnet simulation — no funds moved). Order is now PAID_VERIFIED — fulfilment may begin.`);
     } else {
       pushAgent(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
       setNotice(`Agent Pay blocked: ${data.error ?? "policy failure"}`);
-    }
-    void refreshTimeline(orderId);
-    setBusy(false);
-  }, [orderId, pushAgent, refreshTimeline]);
-
-  const confirmX402Order = useCallback(async (paymentIdentifier: string) => {
-    if (!orderId) return;
-    setBusy(true);
-    const response = await fetch("/api/pay/x402-order/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId, paymentIdentifier }),
-    });
-    const data = await response.json();
-    setOrderState(data.state);
-    if (data.ok && data.payment) {
-      setX402Order(data.payment);
-      pushAgent(`Agent Pay verified. Order is now PAID_VERIFIED — fulfilment may begin.`);
-    } else {
-      pushAgent(`Agent Pay confirmation failed: ${data.error}`);
-      setNotice(`Agent Pay confirmation failed: ${data.error ?? "unknown error"}`);
     }
     void refreshTimeline(orderId);
     setBusy(false);
@@ -888,8 +869,7 @@ export default function HomePage() {
                 x402Order={x402Order}
                 onInitiate={initiate}
                 onMockCapture={mockCapture}
-                onPrepareX402={prepareX402Order}
-                onConfirmX402={confirmX402Order}
+                onSettleX402={prepareX402Order}
                 onFulfil={() => fulfil(false)}
                 onCompensate={compensate}
               />
@@ -1077,8 +1057,7 @@ function PaymentControls({
   x402Order,
   onInitiate,
   onMockCapture,
-  onPrepareX402,
-  onConfirmX402,
+  onSettleX402,
   onFulfil,
   onCompensate,
 }: {
@@ -1092,15 +1071,13 @@ function PaymentControls({
   x402Order: X402OrderInfo | null;
   onInitiate: () => void;
   onMockCapture: () => void;
-  onPrepareX402: () => void;
-  onConfirmX402: (paymentIdentifier: string) => void;
+  onSettleX402: () => void;
   onFulfil: () => void;
   onCompensate: () => void;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [rail, setRail] = useState<"razorpay" | "x402" | null>(null);
   const [boundDigest, setBoundDigest] = useState<string | null>(null);
-  const autoSettledRef = useRef<string | null>(null);
 
   const paid = ["PAID_VERIFIED", "FULFILMENT_PENDING", "FULFILLED", "FULFILMENT_FAILED", "COMPENSATION_PENDING", "REFUNDED"].includes(orderState);
   useEffect(() => {
@@ -1111,16 +1088,6 @@ function PaymentControls({
   const x402Verified = x402Order?.status === "verified";
   const x402PendingCurrent = x402Order?.status === "pending" && x402Order.envelopeDigest === approvedDigest;
 
-  // Rail selection is the single human decision: once the x402 mock order is
-  // prepared, the 402 → signed payment → retry → verification → settlement
-  // simulation runs automatically. No second approval is requested.
-  useEffect(() => {
-    if (rail === "x402" && !selectionStale && x402PendingCurrent && !busy && autoSettledRef.current !== x402Order!.paymentIdentifier) {
-      autoSettledRef.current = x402Order!.paymentIdentifier;
-      onConfirmX402(x402Order!.paymentIdentifier);
-    }
-  }, [rail, selectionStale, x402PendingCurrent, busy, x402Order, onConfirmX402]);
-
   const chooseRail = (next: "razorpay" | "x402") => {
     setRail(next);
     setBoundDigest(approvedDigest);
@@ -1129,7 +1096,9 @@ function PaymentControls({
       setModalOpen(false);
       onInitiate();
     }
-    if (next === "x402" && !x402Order) onPrepareX402();
+    // Agent Pay settles in one request: 402 → signed payment → retry →
+    // verification → settlement. No second approval is requested.
+    if (next === "x402") onSettleX402();
   };
 
   return (
@@ -1145,6 +1114,8 @@ function PaymentControls({
       {x402Verified && x402Order && (
         <div style={{ fontSize: 12, color: "var(--good)", marginBottom: 8 }}>
           Agent Pay verified — <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.paymentIdentifier)}</span>
+          {" · "}₹{(x402Order.amountMinor / 100).toFixed(2)} {x402Order.currency} · envelope{" "}
+          <span style={{ fontFamily: "var(--mono)" }}>{`${x402Order.envelopeDigest.slice(0, 12)}…`}</span>
           {" · "}Solana Devnet simulation — no funds moved.
           {x402Order.mockTxHash && (
             <> &middot; ref: <span style={{ fontFamily: "var(--mono)" }}>{maskId(x402Order.mockTxHash)}</span></>

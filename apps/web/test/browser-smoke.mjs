@@ -296,28 +296,36 @@ async function runViewport(label, viewport) {
   await page.locator('#rail-title').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
   const x402Card = page.locator('button:has-text("Agent Pay with x402")').first();
   check(`${label}: rail modal offers Agent Pay`, (await x402Card.count()) > 0, '');
-  const [prepareResp] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/prepare'), { timeout: 10000 }).catch(() => null),
-    x402Card.click(),
-  ]);
+  // Rail selection settles in one request: attach the waiter before clicking,
+  // since settlement may resolve before detail assertions finish.
+  const settleWatcher = page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/settle'), { timeout: 15000 }).catch(() => null);
+  await x402Card.click();
+  const settleResp = await settleWatcher;
   let x402Id = '';
+  let x402Detail = null;
   try {
-    x402Id = (await prepareResp?.json())?.payment?.paymentIdentifier || '';
+    const settled = await settleResp?.json();
+    x402Id = settled?.payment?.paymentIdentifier || '';
+    x402Detail = settled?.payment || null;
   } catch {}
-  // Read before auto-settlement closes the modal.
-  const detailText = (((await page.locator('.drawer.open').first().textContent().catch(() => '')) || '').replace(/\s+/g, ' ')).trim();
+  // The modal auto-closes on settlement; assert disclosure on the settle
+  // response plus the persistent verified panel.
+  const verifiedText = (((await page.locator('.content-col').first().textContent().catch(() => '')) || '').replace(/\s+/g, ' ')).trim();
   check(
     `${label}: x402 detail discloses terms before confirm`,
-    x402Id.startsWith('x402ord_') && /Network/.test(detailText) && /Exact amount/.test(detailText) && /no funds moved/i.test(detailText),
-    `${x402Id} ${detailText.slice(0, 80)}`,
+    x402Id.startsWith('x402ord_') &&
+      x402Detail?.network?.includes('solana:') &&
+      typeof x402Detail?.amountMinor === 'number' &&
+      !!x402Detail?.recipient &&
+      (x402Detail?.requestDigest || '').length === 64 &&
+      /Agent Pay verified/.test(verifiedText) &&
+      /no funds moved/i.test(verifiedText),
+    `${x402Id} ${verifiedText.slice(0, 80)}`,
   );
   // Rail selection auto-settles: no second approval click.
   const confirmBtn = page.locator('button:has-text("Confirm mock payment")').first();
   check(`${label}: x402 needs no second approval click`, (await confirmBtn.count()) === 0, '');
-  const confirmResp = await page.waitForResponse((r) => r.url().includes('/api/pay/x402-order/confirm'), { timeout: 10000 }).catch(() => null);
-  try {
-    await confirmResp?.json();
-  } catch {}
+  await page.waitForTimeout(800);
   await page.waitForTimeout(800);
   const fulfilX = page.locator('button:has-text("Fulfil order")').first();
   const fulfilXReady = (await fulfilX.count()) > 0 && (await fulfilX.isVisible().catch(() => false));
