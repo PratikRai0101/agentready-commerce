@@ -12,6 +12,8 @@ import type {
   PaymentVerifyRequest,
   FulfilmentCompleteRequest,
   CompensationRefundRequest,
+  X402OrderPrepareRequest,
+  X402OrderConfirmRequest,
 } from "./types";
 import { canonicalRequestHash } from "./hashing";
 import type { OperationStore } from "./store";
@@ -24,7 +26,9 @@ export type OperationRequest =
   | PaymentInitiateRequest
   | PaymentVerifyRequest
   | FulfilmentCompleteRequest
-  | CompensationRefundRequest;
+  | CompensationRefundRequest
+  | X402OrderPrepareRequest
+  | X402OrderConfirmRequest;
 
 export type OperationCoordinator = {
   begin(
