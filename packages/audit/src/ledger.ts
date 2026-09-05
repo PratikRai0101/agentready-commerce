@@ -21,6 +21,8 @@ export type AuditEvent = {
 export type AuditStore = {
   append(event: AuditEvent): Promise<void>;
   list(logicalOrderId: string): Promise<AuditEvent[]>;
+  /** Optional membership probe used when rehydrating stateless snapshots. */
+  has?(eventId: string): Promise<boolean>;
 };
 
 export class MemoryAuditStore implements AuditStore {
@@ -28,6 +30,10 @@ export class MemoryAuditStore implements AuditStore {
 
   async append(event: AuditEvent): Promise<void> {
     this.events.push(event);
+  }
+
+  async has(eventId: string): Promise<boolean> {
+    return this.events.some((event) => event.eventId === eventId);
   }
 
   async list(logicalOrderId: string): Promise<AuditEvent[]> {
