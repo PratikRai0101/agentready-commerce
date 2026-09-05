@@ -19,3 +19,6 @@ backups/
 # x402 Devnet burner keypair files (NEVER commit wallet secrets)
 *-keypair.json
 *-keypair.*.json
+
+# Vercel link metadata and local CLI cache (project identifiers, local only)
+.vercel
