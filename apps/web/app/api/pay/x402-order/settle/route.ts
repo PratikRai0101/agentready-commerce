@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
+import { readSessionToken, restoreSession, tokenFor } from "@/lib/session-token";
 
 export const runtime = "nodejs";
 
@@ -12,16 +13,18 @@ export const runtime = "nodejs";
  * Mock theatre only: no funds move.
  */
 export async function POST(request: Request) {
-  const { orderId } = (await request.json()) as { orderId: string };
+  const body = (await request.json()) as { orderId: string; sessionToken?: string };
+  const { orderId } = body;
   const services = getServices();
+  await restoreSession(services, orderId, readSessionToken(request, body));
   try {
     const prepared = await services.prepareX402OrderPayment(orderId);
     if (!prepared.ok || !prepared.payment) {
-      return NextResponse.json(prepared, { status: 409 });
+      return NextResponse.json({ ...prepared, sessionToken: await tokenFor(services, orderId) }, { status: 409 });
     }
     const confirmed = await services.confirmX402OrderPayment(orderId, prepared.payment.paymentIdentifier);
     if (!confirmed.ok || !confirmed.payment) {
-      return NextResponse.json({ ...confirmed, payment: prepared.payment }, { status: 409 });
+      return NextResponse.json({ ...confirmed, payment: prepared.payment, sessionToken: await tokenFor(services, orderId) }, { status: 409 });
     }
     return NextResponse.json({
       ok: true,
@@ -38,6 +41,7 @@ export async function POST(request: Request) {
         mockTxHash: confirmed.payment.mockTxHash ?? null,
         status: confirmed.payment.status,
       },
+      sessionToken: await tokenFor(services, orderId),
     });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });

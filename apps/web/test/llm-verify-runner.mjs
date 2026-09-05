@@ -155,9 +155,14 @@ async function main() {
     if (!zero.ok) return fail(zero.reason, async () => { await killTree(); process.exit(2); });
     console.log(`SERVER pid=${pid} port=${port} nonce=ok indicators=ok usage=zeroed`);
 
+    let sessionToken = null;
     const post = async (path, body) => {
-      const r = await fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      return r.json();
+      const headers = { "Content-Type": "application/json" };
+      if (sessionToken) headers["x-session-token"] = sessionToken;
+      const r = await fetch(base + path, { method: "POST", headers, body: JSON.stringify(body) });
+      const json = await r.json();
+      if (typeof json?.sessionToken === "string" && json.sessionToken) sessionToken = json.sessionToken;
+      return json;
     };
     const guard = async (stage) => {
       const s = await getStatus();
@@ -198,7 +203,7 @@ async function main() {
     }
 
     const end = await guard("post");
-    const audit = await (await fetch(`${base}/api/audit?orderId=${orderId}`)).json();
+    const audit = await (await fetch(`${base}/api/audit?orderId=${orderId}`, { headers: sessionToken ? { "x-session-token": sessionToken } : {} })).json();
     const interp = (audit.events || []).filter((e) => e.type === "interpreter.interpreted");
     const llmTurns = interp.filter((e) => String(e.summary).includes("source=llm")).length;
     console.log(`AUDIT events=${(audit.events || []).length} interpreted=${interp.length} llmAccepted=${llmTurns}`);

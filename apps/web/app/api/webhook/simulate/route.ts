@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import { razorpaySignature } from "@agentready/payments";
 import { getServices } from "@/lib/services";
+import { readSessionToken, restoreSession, tokenFor } from "@/lib/session-token";
 import { processRazorpayWebhookRaw } from "@/lib/webhook";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const { orderId, replay } = (await request.json()) as { orderId: string; replay?: boolean };
+  const body = (await request.json()) as { orderId: string; replay?: boolean; sessionToken?: string };
+  const { orderId, replay } = body;
   const services = getServices();
+  await restoreSession(services, orderId, readSessionToken(request, body));
   if (!services.isMock) {
     return NextResponse.json({ error: "Webhook simulation requires mock mode" }, { status: 409 });
   }
@@ -51,5 +54,5 @@ export async function POST(request: Request) {
     services.webhookSecret ?? "mock_secret",
   );
 
-  return NextResponse.json({ ...outcome, simulated: true, replay, eventId });
+  return NextResponse.json({ ...outcome, simulated: true, replay, eventId, sessionToken: await tokenFor(services, orderId) });
 }

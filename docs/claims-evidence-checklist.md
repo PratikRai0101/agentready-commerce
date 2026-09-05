@@ -52,4 +52,4 @@
 - [ ] No `order_`/`pay_`/`rfnd_` ID outside the mock set + §8 Test Mode set appears.
 - [ ] Devnet stills carry `?cluster=devnet` URLs and “recorded evidence” captions; amounts read “test tokens, no real money”.
 - [ ] Repo is public; the live demo alias is the Vercel deployment above.
-- [ ] Test counts are cited as last measured (557 passed / 12 skipped — apps/web 462/12 across 23 files + 1 skipped file, packages 95 across 7 files — plus conformance 15/15, measured 2026-09-05) unless CI on this PR re-measures them.
+- [ ] Test counts are cited as last measured (575 passed / 12 skipped — apps/web 480/12 across 24 files + 1 skipped file, packages 95 across 7 files — plus conformance 15/15, measured 2026-09-05) unless CI on this PR re-measures them.

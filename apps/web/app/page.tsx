@@ -110,6 +110,7 @@ export default function HomePage() {
   const [recommendationBinding, setRecommendationBinding] = useState<RecommendationBinding | null>(null);
   const [loadingMsg, setLoadingMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -120,10 +121,32 @@ export default function HomePage() {
     setMessages((prev) => [...prev, { role: "agent", text: stripScores(text) }]);
   }, []);
 
+  // Sealed session token: every response reseals this order's exact server
+  // state, and every request presents it back, so consecutive requests keep
+  // working even when they land on different serverless instances.
+  const tokenRef = useRef<string | null>(null);
+  const apiPost = useCallback(async (path: string, body: Record<string, unknown>) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (tokenRef.current) headers["x-session-token"] = tokenRef.current;
+    const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+    const data = await response.json();
+    if (typeof data?.sessionToken === "string" && data.sessionToken) {
+      tokenRef.current = data.sessionToken;
+      setSessionToken(data.sessionToken);
+    }
+    return data;
+  }, []);
+
   const refreshTimeline = useCallback(
     async (order: string) => {
-      const response = await fetch(`/api/audit?orderId=${order}`);
+      const headers: Record<string, string> = {};
+      if (tokenRef.current) headers["x-session-token"] = tokenRef.current;
+      const response = await fetch(`/api/audit?orderId=${order}`, { headers });
       const data = await response.json();
+      if (typeof data?.sessionToken === "string" && data.sessionToken) {
+        tokenRef.current = data.sessionToken;
+        setSessionToken(data.sessionToken);
+      }
       setTimeline((data.events ?? []).filter((e: AuditEvent) => e.logicalOrderId === order));
     },
     [],
@@ -145,8 +168,7 @@ export default function HomePage() {
     setX402Order(null);
     setIntent([]);
     setIntentVersion(0);
-    const response = await fetch("/api/session", { method: "POST" });
-    const data = await response.json();
+    const data = await apiPost("/api/session", {});
     setOrderId(data.orderId);
     setOrderState(data.state);
     setRails(data.rails ?? []);
@@ -163,16 +185,11 @@ export default function HomePage() {
     async (productId: string, suppliedBinding?: RecommendationBinding) => {
       if (!orderId) return;
       setBusy(true);
-      const response = await fetch("/api/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const data = await apiPost("/api/quote", {
           orderId,
           productId,
           ...(suppliedBinding ?? recommendationBinding ?? {}),
-        }),
-      });
-      const data = await response.json();
+        });
       if (data.error) {
         pushAgent(`Could not quote: ${data.error}`);
         setErrorMsg(data.error);
@@ -214,12 +231,7 @@ export default function HomePage() {
       setLoadingMsg("Interpreting your message…");
       setErrorMsg(null);
       try {
-        const response = await fetch("/api/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orderId, message: text }),
-        });
-        const data = await response.json();
+        const data = await apiPost("/api/respond", { orderId, message: text });
         setOrderState(data.state);
         setLoadingMsg(null);
 
@@ -351,12 +363,7 @@ export default function HomePage() {
           return;
         }
 
-        const response = await fetch("/api/intent-patch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orderId, intentPatch: patch, expectedIntentVersion: intentVersion }),
-        });
-        const data = await response.json();
+        const data = await apiPost("/api/intent-patch", { orderId, intentPatch: patch, expectedIntentVersion: intentVersion });
         if (data.ok) {
           // Rebuild intent from server response
           const newFields: IntentField[] = [];
@@ -423,12 +430,7 @@ export default function HomePage() {
           patch.mustBeReturnable = /true|yes|returnable/i.test(newValue);
         }
 
-        const response = await fetch("/api/intent-patch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orderId, intentPatch: patch, expectedIntentVersion: intentVersion }),
-        });
-        const data = await response.json();
+        const data = await apiPost("/api/intent-patch", { orderId, intentPatch: patch, expectedIntentVersion: intentVersion });
 
         if (data.ok) {
           // Sync from server response — never restore stale client intent
@@ -481,12 +483,7 @@ export default function HomePage() {
   const approve = useCallback(async () => {
     if (!orderId || !quote) return;
     setBusy(true);
-    const response = await fetch("/api/approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId, digest: quote.digest }),
-    });
-    const data = await response.json();
+    const data = await apiPost("/api/approve", { orderId, digest: quote.digest });
     setOrderState(data.state);
     if (data.ok) {
       pushAgent(`Approval bound to envelope hash ${quote.digest.slice(0, 16)}…`);
@@ -501,12 +498,7 @@ export default function HomePage() {
   const initiate = useCallback(async () => {
     if (!orderId || !quote) return;
     setBusy(true);
-    const response = await fetch("/api/pay/initiate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId, rail: "razorpay_checkout" }),
-    });
-    const data = await response.json();
+    const data = await apiPost("/api/pay/initiate", { orderId, rail: "razorpay_checkout" });
     setOrderState(data.state);
     if (!data.ok) {
       pushAgent(`Payment blocked: ${data.error ?? "policy failure"}`);
@@ -535,12 +527,7 @@ export default function HomePage() {
     async (externalOrderId: string, externalPaymentId: string, signature: string) => {
       if (!orderId) return;
       setBusy(true);
-      const response = await fetch("/api/pay/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId, razorpay_order_id: externalOrderId, razorpay_payment_id: externalPaymentId, razorpay_signature: signature }),
-      });
-      const data = await response.json();
+      const data = await apiPost("/api/pay/verify", { orderId, razorpay_order_id: externalOrderId, razorpay_payment_id: externalPaymentId, razorpay_signature: signature });
       setOrderState(data.state);
       setPaymentIds((prev) => ({ ...prev, paymentId: externalPaymentId, signature }));
       if (data.ok) {
@@ -557,12 +544,7 @@ export default function HomePage() {
   const mockCapture = useCallback(async () => {
     if (!orderId) return;
     setBusy(true);
-    const response = await fetch("/api/pay/mock-capture", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId }),
-    });
-    const data = await response.json();
+    const data = await apiPost("/api/pay/mock-capture", { orderId });
     if (data.error) {
       pushAgent(`Capture failed: ${data.error}`);
     } else {
@@ -576,12 +558,7 @@ export default function HomePage() {
     setBusy(true);
     // Single-request settlement: prepare + confirm run on one server, so the
     // result never depends on state shared across serverless instances.
-    const response = await fetch("/api/pay/x402-order/settle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId }),
-    });
-    const data = await response.json();
+    const data = await apiPost("/api/pay/x402-order/settle", { orderId });
     setOrderState(data.state);
     if (data.payment) setX402Order(data.payment);
     if (data.ok) {
@@ -606,12 +583,7 @@ export default function HomePage() {
     async (fail: boolean) => {
       if (!orderId) return;
       setBusy(true);
-      const response = await fetch("/api/fulfil", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId, fail }),
-      });
-      const data = await response.json();
+      const data = await apiPost("/api/fulfil", { orderId, fail });
       setOrderState(data.state);
       pushAgent(data.ok ? "Order fulfilled and shipped." : `Fulfilment failed: ${data.error}`);
       void refreshTimeline(orderId);
@@ -623,12 +595,7 @@ export default function HomePage() {
   const compensate = useCallback(async () => {
     if (!orderId) return;
     setBusy(true);
-    const response = await fetch("/api/compensate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId }),
-    });
-    const data = await response.json();
+    const data = await apiPost("/api/compensate", { orderId });
     setOrderState(data.state);
     pushAgent(data.ok ? `Refund initiated: ${data.refundId ?? "n/a"}` : `Compensation failed: ${data.error}`);
     void refreshTimeline(orderId);
@@ -637,8 +604,7 @@ export default function HomePage() {
 
   const resetDemo = useCallback(async () => {
     setBusy(true);
-    const response = await fetch("/api/reset", { method: "POST" });
-    const data = await response.json();
+    const data = await apiPost("/api/reset", {});
     setOrderId(data.orderId);
     setOrderState(data.state);
     setMessages([]);
@@ -672,8 +638,14 @@ export default function HomePage() {
     setX402Order(null);
     setRecommendationBinding(null);
     setIntent([]);
-    const response = await fetch("/api/scenario");
+    const headers: Record<string, string> = {};
+    if (tokenRef.current) headers["x-session-token"] = tokenRef.current;
+    const response = await fetch("/api/scenario", { headers });
     const data = await response.json();
+    if (typeof data?.sessionToken === "string" && data.sessionToken) {
+      tokenRef.current = data.sessionToken;
+      setSessionToken(data.sessionToken);
+    }
     setOrderId(data.orderId);
     setOrderState(data.state);
     setTimeline((data.events ?? []).filter((e: AuditEvent) => e.logicalOrderId === data.orderId));

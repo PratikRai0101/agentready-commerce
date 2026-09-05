@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
+import { readSessionToken, restoreSession, tokenFor } from "@/lib/session-token";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "orderId and payment response fields are required" }, { status: 400 });
   }
   const services = getServices();
+  await restoreSession(services, orderId, readSessionToken(request, body));
   const result = await services.verifyPayment(orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature);
-  return NextResponse.json(result, { status: result.ok ? 200 : 409 });
+  return NextResponse.json({ ...result, sessionToken: await tokenFor(services, orderId) }, { status: result.ok ? 200 : 409 });
 }

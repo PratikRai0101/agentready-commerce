@@ -54,6 +54,13 @@ import type { DevnetMachineResource } from "@agentready/payments/devnet-machine"
 import { createLlmProvider, productMatchToExplainInput, type LlmProvider } from "./llm";
 import { deterministicInterpretation, interpretUserMessage, type InterpretationOutcome, type StructuredInterpretation } from "./interpreter";
 import { createDialogueMemory, syncMemory, invalidateQuote, invalidateRecommendations, acknowledgeChange, nextClarification, type DialogueMemory } from "./dialogue";
+import {
+  sealSnapshot,
+  openSnapshot,
+  SESSION_SNAPSHOT_VERSION,
+  SESSION_SNAPSHOT_TTL_MS,
+  MAX_CACHED_SESSIONS,
+} from "./session-token";
 import { renderWhyThisOne, renderComparison, renderCompromises, renderCheaper } from "./explain";
 
 export type RecommendationBinding = {
@@ -101,6 +108,7 @@ export type MachineSpendAttemptSummary = Pick<
 export type Session = {
   logicalOrderId: string;
   customerId: string;
+  createdAt: string;
   state: OrderState;
   message: string;
   intent: ParsedIntent;
@@ -169,6 +177,10 @@ export type AppServices = {
   timeline(orderId: string): Promise<AuditEvent[]>;
   getSession(orderId: string): Session | undefined;
   getEnvelope(orderId: string): EnvelopeRecord | undefined;
+  /** Seal this order's exact server state into a tamper-evident token (null when unknown). */
+  exportSession(orderId: string): Promise<string | null>;
+  /** Restore a sealed snapshot (e.g. on a serverless instance that never saw this order). */
+  importSession(token: string, expectedOrderId?: string): Promise<{ ok: true; orderId: string; state: OrderState } | { ok: false; error: string }>;
   getMandate(customerId: string): PurchaseMandate | undefined;
   isWebhookProcessed(eventId: string): boolean;
   markWebhookProcessed(eventId: string): void;
@@ -244,8 +256,19 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
   const operationStore = new MemoryOperationStore();
   const coordinator = createOperationCoordinator(operationStore);
 
-  function withSessionLock<T>(orderId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = sessionOperations.get(orderId) ?? Promise.resolve();
+  // Demo-session hygiene: insertion-ordered maps are capped so one instance
+  // cannot accumulate unbounded state. Expired snapshots are rejected on
+  // import; envelope/quote expiry is still enforced by deterministic policy.
+  function pruneSessionCache() {
+    while (sessions.size > MAX_CACHED_SESSIONS) {
+      const oldest = sessions.keys().next();
+      if (oldest.done) break;
+      sessions.delete(oldest.value);
+      envelopes.delete(oldest.value);
+    }
+  }
+
+  function withSessionLock<T>(orderId: string, operation: () => Promise<T>): Promise<T> {    const previous = sessionOperations.get(orderId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(operation);
     sessionOperations.set(orderId, current);
     return current.finally(() => {
@@ -289,12 +312,14 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       const session: Session = {
         logicalOrderId,
         customerId,
+        createdAt: new Date().toISOString(),
         state: "DRAFT",
         message: "",
         intent: {},
         dialogue: createDialogueMemory(),
       };
       sessions.set(logicalOrderId, session);
+      pruneSessionCache();
       void audit.log({
         logicalOrderId,
         type: "session.created",
@@ -318,6 +343,47 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
     getMandate(customerId) {
       return mandates.get(customerId);
+    },
+
+    async exportSession(orderId) {
+      const session = sessions.get(orderId);
+      if (!session) return null;
+      const now = new Date();
+      const snapshot = {
+        version: SESSION_SNAPSHOT_VERSION,
+        issuedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + SESSION_SNAPSHOT_TTL_MS).toISOString(),
+        session: structuredClone(session),
+        envelope: structuredClone(envelopes.get(orderId) ?? null),
+        mandate: structuredClone(mandates.get(session.customerId) ?? null),
+        audit: await audit.timeline(orderId),
+      } as const;
+      return sealSnapshot(snapshot, signingSecret);
+    },
+
+    async importSession(token, expectedOrderId) {
+      const snapshot = openSnapshot(token, signingSecret);
+      if (!snapshot) {
+        return { ok: false as const, error: "Invalid or expired session token — start a new conversation." };
+      }
+      if (expectedOrderId && snapshot.session.logicalOrderId !== expectedOrderId) {
+        return { ok: false as const, error: "Session token does not match this order — start a new conversation." };
+      }
+      if (snapshot.envelope && envelopeDigest(snapshot.envelope.envelope) !== snapshot.envelope.digest) {
+        return { ok: false as const, error: "Session snapshot failed integrity check — start a new conversation." };
+      }
+      const { session } = snapshot;
+      sessions.set(session.logicalOrderId, session);
+      if (snapshot.envelope) envelopes.set(session.logicalOrderId, snapshot.envelope);
+      if (snapshot.mandate) mandates.set(session.customerId, snapshot.mandate);
+      for (const event of snapshot.audit) {
+        if (event.logicalOrderId !== session.logicalOrderId) continue;
+        if (!(await store.has(event.eventId))) await store.append(event);
+        const eventId = event.externalReferences?.eventId;
+        if (typeof eventId === "string" && !webhookDedup.has(eventId)) webhookDedup.set(eventId, event.occurredAt);
+      }
+      pruneSessionCache();
+      return { ok: true as const, orderId: session.logicalOrderId, state: session.state };
     },
 
     async respond(orderId, message, selectionBinding, operationId) {

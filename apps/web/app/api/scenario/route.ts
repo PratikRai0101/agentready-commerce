@@ -211,6 +211,7 @@ export async function GET() {
       fitScores: session.machineSpend?.fitScores,
       events,
       scenario: "corrected-stale-selection",
+      sessionToken: await services.exportSession(orderId),
     });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error), orderId, transcript }, { status: 500 });

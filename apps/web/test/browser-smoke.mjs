@@ -68,12 +68,14 @@ async function getBudgetLabel(page) {
   return hit ? hit.trim() : null;
 }
 
-async function fetchTimeline(page, orderId) {
-  return page.evaluate(async (oid) => {
-    const r = await fetch(`/api/audit?orderId=${oid}`);
+async function fetchTimeline(page, orderId, sessionToken) {
+  return page.evaluate(async ({ oid, token }) => {
+    const r = await fetch(`/api/audit?orderId=${oid}`, {
+      headers: token ? { "x-session-token": token } : {},
+    });
     const j = await r.json();
     return j.events || [];
-  }, orderId);
+  }, { oid: orderId, token: sessionToken || null });
 }
 
 async function approveNow(page) {
@@ -141,8 +143,11 @@ async function runViewport(label, viewport) {
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   const sessionResp = await sessionRespPromise;
   let oid = null;
+  let sessionToken = null;
   try {
-    oid = (await sessionResp?.json())?.orderId || null;
+    const sessionJson = await sessionResp?.json();
+    oid = sessionJson?.orderId || null;
+    sessionToken = sessionJson?.sessionToken || null;
   } catch {}
   check(`${label}: session created`, !!oid, oid || 'no orderId');
 
@@ -178,7 +183,7 @@ async function runViewport(label, viewport) {
   const chooseBtn = page.locator('button:has-text("Choose payment method")').first();
   const chooseVisible = (await chooseBtn.count()) > 0 && (await chooseBtn.isVisible().catch(() => false));
   check(`${label}: approve binds envelope (rail choice offered)`, approved1 && chooseVisible, '');
-  const timeline1 = oid ? await fetchTimeline(page, oid) : [];
+  const timeline1 = oid ? await fetchTimeline(page, oid, sessionToken) : [];
   check(
     `${label}: audit records approval`,
     timeline1.filter((e) => e.type === 'approval.granted').length >= 1,
@@ -191,7 +196,7 @@ async function runViewport(label, viewport) {
   const budget3000 = await getBudgetLabel(page);
   const hero3000 = await getHero(page);
   const approveGone = (await page.locator('button:has-text("Approve exact envelope hash")').count()) === 0;
-  const timeline2 = oid ? await fetchTimeline(page, oid) : [];
+  const timeline2 = oid ? await fetchTimeline(page, oid, sessionToken) : [];
   check(`${label}: editor closes after save`, stillEditing === 0 && !!budget3000 && budget3000.includes('3,000'), `inputs=${stillEditing} budget=${budget3000}`);
   check(`${label}: recommendations update (5000→3000)`, !!hero3000.name && hero3000.name !== hero5000.name, `${hero5000.name} → ${hero3000.name} ${hero3000.price}`);
   check(`${label}: approval resets after material edit`, approveGone, '');
@@ -280,8 +285,11 @@ async function runViewport(label, viewport) {
   await page.reload({ waitUntil: 'domcontentloaded' });
   const reloadSessionResp = await reloadSessionPromise;
   let oid2 = null;
+  let sessionToken2 = null;
   try {
-    oid2 = (await reloadSessionResp?.json())?.orderId || null;
+    const reloadJson = await reloadSessionResp?.json();
+    oid2 = reloadJson?.orderId || null;
+    sessionToken2 = reloadJson?.sessionToken || null;
   } catch {}
   await page.locator('.composer-input').waitFor({ state: 'visible', timeout: 20000 });
   check(`${label}: x402 flow starts a fresh session`, !!oid2, oid2 || 'no orderId');
@@ -330,7 +338,7 @@ async function runViewport(label, viewport) {
   const fulfilX = page.locator('button:has-text("Fulfil order")').first();
   const fulfilXReady = (await fulfilX.count()) > 0 && (await fulfilX.isVisible().catch(() => false));
   check(`${label}: x402 mock confirm reaches PAID_VERIFIED`, fulfilXReady, '');
-  const timelineX = oid2 ? await fetchTimeline(page, oid2) : [];
+  const timelineX = oid2 ? await fetchTimeline(page, oid2, sessionToken2) : [];
   check(
     `${label}: audit records x402 selection + verification`,
     timelineX.some((e) => e.type === 'x402_order.prepared') && timelineX.some((e) => e.type === 'x402_order.verified'),

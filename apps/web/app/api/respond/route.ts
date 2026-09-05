@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServices, type RecommendationBinding } from "@/lib/services";
+import { readSessionToken, restoreSession, tokenFor } from "@/lib/session-token";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,7 @@ export async function POST(request: Request) {
   }
   const services = getServices();
   try {
+    await restoreSession(services, orderId, readSessionToken(request, body));
     const binding: RecommendationBinding | undefined =
       typeof body.intentVersion === "number" &&
       typeof body.recommendationVersion === "number" &&
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
           }
         : undefined;
     const result = await services.respond(orderId, message.trim(), binding);
-    return NextResponse.json(result);
+    return NextResponse.json({ ...result, sessionToken: await tokenFor(services, orderId) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
