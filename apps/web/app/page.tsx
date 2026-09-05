@@ -1112,7 +1112,11 @@ function PaymentControls({
   const chooseRail = (next: "razorpay" | "x402") => {
     setRail(next);
     setBoundDigest(approvedDigest);
-    if (next === "razorpay" && !razorpayStarted) onInitiate();
+    if (next === "razorpay" && !razorpayStarted) {
+      // The checkout panel renders inline, so the modal can close.
+      setModalOpen(false);
+      onInitiate();
+    }
     if (next === "x402" && !x402Order) onPrepareX402();
   };
 
