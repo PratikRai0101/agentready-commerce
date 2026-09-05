@@ -32,15 +32,15 @@
 |---|---|
 | 0:00 | Storefront `/` loaded. State the mock-only framing. |
 | 0:25 | Show `/.well-known/agentready` + `/api/catalog` JSON. |
-| 0:50 | Composer: `I need black shoes under ₹5,000.` → Send. Show clarification. |
-| 1:10 | Reply `UK 9, road running up to 10K, wide fit, max cushioning, must be returnable` → Send. Show 3 cards. |
-| 1:40 | Still: Devnet explorer `5FQb8Jh7…?cluster=devnet` + evidence header. Narrate as recorded. |
-| 1:55 | Max Cushion card → Select → approval panel → “Approve exact envelope hash” → “Order & trust” drawer. |
-| 2:35 | “Pay with Razorpay” → “Complete test payment”. Narrate mock IDs. |
-| 2:55 | Stills: `docs/evidence/razorpay-test-proof.md` table (orders `order_TWTuHSmXrkHoUJ`, `order_TWVIgwsRyjV7C8`, `order_TWVLQtCV7OXCmI`; refund `rfnd_TWVNeD4HStaNby` processed). |
-| 3:15 | `/demo` → “Run prepared scenario” or “Price change after approval”. Show `REAPPROVAL_REQUIRED` + named fields. |
-| 3:50 | “Replay webhook” (fresh → deduplicated) → “Run conformance suite” (15/15) → drawer timeline scroll. |
-| 4:20 | Back to `/` hero. Deliver value + Vulcan future-alignment line. Stop at 5:00. |
+| 0:50 | Composer: `I need black shoes under ₹5,000.` → Send. Show size-and-use question. |
+| 1:05 | Reply `UK 9, road running` → Send (shortlist), then add `wide fit, max cushioning` → Send (mock fit scores). |
+| 1:35 | Still: Devnet explorer `5FQb8Jh7…?cluster=devnet` + evidence header. Narrate HTTP-500-then-reconciled caveat; scores on screen are mock. |
+| 1:50 | Max Cushion card → Select → approval panel → “Approve exact envelope hash” → “Order & trust” drawer. |
+| 2:30 | “Pay with Razorpay” → “Complete test payment”. Narrate mock IDs. |
+| 2:55 | Stills: `docs/evidence/razorpay-test-proof.md` table (orders `order_TWTuHSmXrkHoUJ`, `order_TWVIgwsRyjV7C8`, `order_TWVLQtCV7OXCmI`; Razorpay Test Mode refund `rfnd_TWVNeD4HStaNby` processed). |
+| 3:10 | `/demo` → “Price change after approval” (self-contained `POST /api/demo/price-drift`). Show invalidated digest, `REAPPROVAL_REQUIRED`, named change, stale approval + payment blocked. |
+| 3:45 | “Replay webhook” (self-contained `POST /api/demo/webhook-replay`: first processed fresh, second deduplicated) → “Run conformance suite” (15/15) → drawer timeline scroll. |
+| 4:15 | Back to `/` hero. Deliver value + Vulcan future-alignment line. Stop at 5:00. |
 
 ### Fresh-state recovery (if anything looks stale)
 
@@ -66,7 +66,9 @@
   `/.well-known/agentready` JSON, catalog JSON, shortlist screenshot, approval
   panel screenshot, `order_MOCK_*` screenshot, `docs/evidence/razorpay-test-proof.md`
   table, Devnet explorer `5FQb8Jh7…` + `9Z795iRrqkymKipM3XTY7q3gY7FZ2qvUFQKisnewPmhKH3opqzyVq2gmyPxrrJ8ez2KxSDHdXvJ8qeqkKKZi4JM`
-  stills, Demo Lab tamper notice, 15/15 conformance, audit timeline.
+  stills, Demo Lab price-drift notice (digest invalidated → REAPPROVAL_REQUIRED,
+  stale approval + payment blocked), webhook-replay notice (first processed
+  fresh, second deduplicated), 15/15 conformance, audit timeline.
 - Narrate the identical pitch script over stills; keep the same honesty
   captions (“mock-only”, “recorded Test Mode 2026-08-31/09-01”, “recorded
   Devnet 2026-09-04 / harness 2026-09-02”).

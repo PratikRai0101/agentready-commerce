@@ -33,29 +33,30 @@
 - Clicks: none (read-only GETs).
 - Capture: `protocolConformance: "None claimed…"`, `productCount: 6`,
   `indicators: {razorpay: mock, x402: mock, llm: disabled}`.
-- Narration: pitch-script first two paragraphs of §0:25–1:10.
+- Narration: pitch-script first two paragraphs of §0:25–1:05.
 
-## Scene 3 — Conversational shopping (0:50–1:10, 20s)
+## Scene 3 — Conversational shopping (0:50–1:05, 15s)
 
 - URL: `https://agentready-commerce-pied.vercel.app/` (composer focused).
 - Clicks:
   1. Click composer input, type `I need black shoes under ₹5,000.`, click Send.
-  2. Show agent clarification + quick-reply chips; do not answer yet.
-- Capture: user bubble, agent question bubble (“size, use, fit…”).
-- Narration: pitch-script last paragraph of §0:25–1:10.
+  2. Show the single agent question (size first) + use-case quick-reply chips; do not answer yet.
+- Capture: user bubble, agent question bubble naming size, quick replies for use.
+- Narration: pitch-script §0:25–1:05 last paragraph.
 
-## Scene 4 — Grounded ranking (1:10–1:40, 30s)
+## Scene 4 — Grounded ranking (1:05–1:35, 30s)
 
 - URL: same storefront tab (state preserved).
-- Clicks: answer clarifications in one message —
-  `UK 9, road running up to 10K, wide fit, max cushioning, must be returnable`
-  — click Send.
+- Clicks:
+  1. Answer `UK 9, road running` — click Send — shortlist appears (size + use
+     are the only hard blockers).
+  2. Add `wide fit, max cushioning` — click Send — mock x402 fit scores arrive.
 - Capture: three `ProductCard` cards (Max Cushion ₹4,899 best overall; Streak 4
-  ₹4,299 cheaper alternative; Stride Lite ₹3,499 trade-off), fit-score notes,
-  explicit compromises.
-- Narration: pitch-script §1:10–1:55 first paragraph.
+  ₹4,299 cheaper alternative; Stride Lite ₹3,499 trade-off), fit-score notes
+  labelled MOCK settlement, explicit compromises.
+- Narration: pitch-script §1:05–1:50 first paragraph.
 
-## Scene 5 — x402 settlement evidence still (1:40–1:55, 15s)
+## Scene 5 — x402 settlement evidence still (1:35–1:50, 15s)
 
 - URL (still image, no click):
   `https://explorer.solana.com/tx/5FQb8Jh7LTmwoecXpv7TGDos61oFqo66T74uYY6mA6cWuD2EaHTQ73FsY2EZ99Wsj7j3SknsT4WE8vDmGxtt1Vfk?cluster=devnet`
@@ -64,10 +65,11 @@
   `agentcart:v1:6826a0b9…`, slot `493082743`, finalized, `meta.err` null).
 - Clicks: none.
 - Capture: explorer “Success / Finalized” banner + memo instruction.
-- Narration: pitch-script §1:10–1:55 second paragraph. Caption: “Recorded
-  2026-09-04 evidence — not performed by the public demo.”
+- Narration: pitch-script §1:05–1:50 second paragraph. Captions: “Recorded
+  2026-09-04 evidence — not performed by the public demo.” + “That request
+  returned HTTP 500 and was reconciled read-only; scores on screen are mock.”
 
-## Scene 6 — Explicit approval (1:55–2:35, 40s)
+## Scene 6 — Explicit approval (1:50–2:30, 40s)
 
 - URL: same storefront tab.
 - Clicks:
@@ -79,10 +81,10 @@
   4. Click “Order & trust” (topbar `trust-badge`) to open drawer; show
      `approval.bound` event.
 - Capture: digest string, “approved” state, drawer event row.
-- Narration: pitch-script §1:55–2:35. Read the on-screen total; do not narrate
+- Narration: pitch-script §1:50–2:30. Read the on-screen total; do not narrate
   a memorized number.
 
-## Scene 7 — Bounded money, mock pay (2:35–2:55, 20s)
+## Scene 7 — Bounded money, mock pay (2:30–2:55, 25s)
 
 - URL: same storefront tab (approval present).
 - Clicks:
@@ -91,10 +93,10 @@
   2. Click “Complete test payment” (`POST /api/pay/mock-capture` → verify).
   3. Show `order_MOCK_*` / `pay_MOCK_*` IDs + “signature verified”.
 - Capture: payment panel + drawer `payment.verified` event.
-- Narration: pitch-script §2:35–3:15 first paragraph. Caption: “Mock order —
+- Narration: pitch-script §2:30–3:10 first paragraph. Caption: “Mock order —
   no funds moved.”
 
-## Scene 8 — Razorpay Test Mode lifecycle stills (2:55–3:15, 20s)
+## Scene 8 — Razorpay Test Mode lifecycle stills (2:55–3:10, 15s)
 
 - Stills (no clicks, no live calls):
   - `docs/evidence/razorpay-test-proof.md` transactions table:
@@ -104,40 +106,41 @@
     `TWVLtSP9a4RfZ4` + refund `rfnd_TWVNeD4HStaNby` processed → `REFUNDED`.
   - Audit chain: approval → Test Mode order → webhook → `PAID_VERIFIED` →
     fulfil-fail → refund.
-- Narration: pitch-script §2:35–3:15 second + third paragraphs. Caption:
-  “Recorded 2026-08-31/09-01 Test Mode evidence.”
+- Narration: pitch-script §2:30–3:10 second paragraph. Caption:
+  “Recorded Aug/Sep Test Mode integration-path evidence — Razorpay Test Mode
+  refund, not performed by the public demo.”
 
-## Scene 9 — Graceful failure (3:15–3:50, 35s)
+## Scene 9 — Graceful failure (3:10–3:45, 35s)
 
 - URL: `https://agentready-commerce-pied.vercel.app/demo`
-- Clicks (either path; prefer deterministic API scenario for recording):
-  - Option A (visible): click “Run prepared scenario” (`GET /api/scenario`),
-    then show invalidation block: budget edit to ₹3,000 → stale-digest approval
-    rejected + stale payment rejected, exact changed fields named.
-  - Option B: click “Price change after approval” (`POST /api/tamper`
-    `{field: price}`), show `REAPPROVAL_REQUIRED` notice + timeline event.
-- Capture: notice banner (“Material change detected…”) + state + audit event.
-- Narration: pitch-script §3:15–3:50 verbatim.
+- Clicks: click “Price change after approval” (`POST /api/demo/price-drift`
+  `{field: price}` — self-contained: approve → tamper → stale retries in one
+  request, no shared-session dependency).
+- Capture: notice banner (“Price drift: approval `<12 hex>…` invalidated →
+  REAPPROVAL_REQUIRED; price changed …; stale approval blocked; stale payment
+  blocked”) + state + audit events.
+- Narration: pitch-script §3:10–3:45 verbatim.
 
-## Scene 10 — Recovery + auditability (3:50–4:20, 30s)
+## Scene 10 — Recovery + auditability (3:45–4:15, 30s)
 
 - URL: same `/demo` tab.
 - Clicks:
-  1. Click “Replay webhook” (two `POST /api/webhook/simulate` calls) — show
-     “first processed (fresh), second deduplicated”.
+  1. Click “Replay webhook” (`POST /api/demo/webhook-replay` — one session to
+     PAYMENT_PENDING, then the same webhook twice under one event ID) — show
+     “first processed (fresh), second deduplicated” and PAID_VERIFIED.
   2. Click “Run conformance suite” (`GET /api/conformance`) — show 15/15 gates.
   3. Reopen “Order & trust” drawer (storefront tab) — scroll intent → receipt.
 - Capture: replay notice, gate list, full timeline.
-- Narration: pitch-script §3:50–4:20 verbatim.
+- Narration: pitch-script §3:45–4:15 verbatim.
 
-## Scene 11 — Value + scope honesty (4:20–5:00, 40s)
+## Scene 11 — Value + scope honesty (4:15–5:00, 45s)
 
 - URL: back to `https://agentready-commerce-pied.vercel.app/` hero.
 - Clicks: none.
 - Capture: slow pull-back; final caption card with three lines:
   “Mock-only public demo · Test Mode + Devnet are recorded evidence ·
   Vulcan not integrated.”
-- Narration: pitch-script §4:20–5:00 verbatim, including: “Vulcan can make
+- Narration: pitch-script §4:15–5:00 verbatim, including: “Vulcan can make
   payment intelligence smarter; RunVista makes the agent executing payment
   decisions bounded, explainable and auditable.”
 
