@@ -1,112 +1,106 @@
-# Five-minute pitch script — AgentReady Commerce (RunVista)
+# Five-minute pitch script: RunVista
 
-> 608 spoken words at ~130 wpm ≈ 4:41 narration, with UI actions inside the
-> cues = 5:00.
-> Read the quoted lines verbatim; bracketed cues are actions, not narration.
-> The public demo at `https://agentready-commerce-pied.vercel.app` is
-> mock-only. Razorpay Test Mode and Solana Devnet appear as recorded evidence,
-> not actions performed by the public demo.
+> 610 spoken words at 130 words per minute, leaving time for the UI actions.
+> Read the quoted sections aloud. The bracketed lines are recording cues.
+> The public demo at `https://agentready-commerce-pied.vercel.app` uses mocks.
+> Razorpay Test Mode and Solana Devnet are shown only as recorded evidence.
 
-## 0:00–0:25 — Problem
+## 0:00 to 0:25 | The problem
 
-“AI can already recommend products, and Razorpay can already execute payments.
-The unresolved risk is whether the eventual charge and fulfilment still match
-what the customer actually approved.
+"AI can recommend a product, and Razorpay can collect the payment. But does the
+final charge still match what the customer approved?
 
-Carts drift: prices change, variants substitute, tools retry, webhooks replay.
-AgentReady Commerce is the merchant-side control plane: one approved intent,
-one successful charge, one inspectable evidence chain — shown here on the
-fictional RunVista storefront, running mock-only.”
+Prices change, sizes get replaced, tools retry and webhooks repeat. RunVista is
+the merchant's control layer: one approved cart, one successful charge and one
+audit trail. I am showing it on a fictional storefront in mock mode."
 
-[Cue: storefront `/` loaded, mock indicators visible.]
+[Cue: Open the storefront. Keep the mock indicators visible.]
 
-## 0:25–1:05 — Discovery + clarification
+## 0:25 to 1:05 | Discovery and clarification
 
-“Buyer agents start at machine-readable discovery. `GET /.well-known/agentready`
-states the merchant, the catalog path, the gated routes, the exact approval
-rule, and the disclosures: synthetic catalog, no protocol-conformance claim.
-`GET /api/catalog` returns the same six-product catalog the ranking engine
-uses — chat and machines can never disagree on price, stock, or policy.
+"A buyer agent discovers the store through this endpoint. It lists the catalog,
+paid routes, exact approval rule and disclosures, including the synthetic catalog
+and the absence of a protocol conformance claim. The catalog endpoint returns the
+same six products used for ranking, so chat and machines see the same facts.
 
-Now the human path. I type: ‘I need black shoes under ₹5,000.’ The agent
-refuses to guess. It asks only for size and use — the two hard blockers —
-with quick replies, then shortlists.”
+I type, 'I need black shoes under ₹5,000.' RunVista does not guess. It asks for
+the two missing requirements, size and use."
 
-[Cue: show both endpoints, type the request, show the size-and-use question.]
+[Cue: Show both endpoints. Enter the request and display the size and use question.]
 
-## 1:05–1:50 — Grounded shortlist, mock fit scores
+## 1:05 to 1:50 | The shortlist
 
-“I answer UK 9, road running, and add wide fit with max cushioning. Three
-cards appear — never one unsupported best shoe. Max Cushion at ₹4,899 is the
-best overall match; Streak 4 at ₹4,299 the cheaper alternative; Stride Lite at
-₹3,499 the trade-off. Every fact is catalog-verbatim; every compromise is
-explicit.
+"I choose UK 9, road running, wide fit and maximum cushioning. RunVista returns
+three choices, not one unsupported winner. Max Cushion at ₹4,899 is the closest
+match. Streak 4 at ₹4,299 is cheaper. Stride Lite at ₹3,499 has a clear trade-off.
+Every product fact comes from the catalog.
 
-Those fit scores come from the public mock x402 settlement — no funds moved.
-Separately, one real application-path Devnet settlement finalized on-chain in
-September, signature `5FQb8Jh7…`; that request itself returned HTTP 500 and
-was reconciled read-only with no resubmission. The scores on screen are mock.”
+These fit scores use mock x402, so no funds moved. Separately, one real 0.01 USDC
+application-path payment finalized on Solana Devnet in September. That request
+returned HTTP 500. We checked the chain and reconciled the existing record
+read-only, with no resubmission. Its signature begins `5FQb8Jh7`."
 
-[Cue: shortlist + fit scores; cut to the Devnet evidence still.]
+[Cue: Show the shortlist and fit scores, then the recorded Devnet evidence.]
 
-## 1:50–2:30 — Exact approval
+## 1:50 to 2:30 | Exact approval
 
-“I select Max Cushion, UK 9, SKU VMAX-BLK-9. The system freezes an exact
-Commerce Envelope: merchant, SKU, variant, quantity, subtotal, ₹49 shipping,
-total, return terms, inventory hold, mandate, expiry.
+"I select Max Cushion, UK 9, SKU VMAX-BLK-9. RunVista freezes a Commerce Envelope
+with the merchant, SKU, variant, quantity, subtotal, ₹49 shipping, total, return
+terms, inventory hold, mandate and expiry.
 
-Approval binds to the SHA-256 hash of that exact envelope, shown on screen.
-The deterministic policy engine checks mandate, merchant, amount, and expiry.
-The model only interpreted and explained; it has no authority to move money.
-I click ‘Approve exact envelope hash’; the timeline records `approval.bound`.”
+Approval attaches to its SHA-256 hash. If a material field changes, the approval
+no longer applies. Deterministic policy checks the mandate, merchant, amount and
+expiry. The model interprets and explains, but cannot move money. I click
+'Approve exact envelope hash,' and the timeline records `approval.bound`."
 
-[Cue: approval card, click Approve, open ‘Order & trust’.]
+[Cue: Open the approval card, approve the hash, then open "Order & trust".]
 
-## 2:30–3:10 — Mock payment + Test Mode evidence
+## 2:30 to 3:10 | Razorpay payment
 
-“One logical order, one successful rail. I click ‘Pay with Razorpay’: on this
-host that creates a mock order `order_MOCK_*` — no funds move.
+"One order gets one payment rail. I click 'Choose payment method':
+'Razorpay Checkout' mints a mock `order_MOCK_*`; 'Agent Pay with x402' shows the
+network, asset, exact amount, recipient and digests for a Solana Devnet
+simulation to confirm. No funds move either way, and the service layer blocks
+whichever rail loses.
 
-The Razorpay Test Mode integration-path evidence from August and September is
-separate: three Test Mode checkouts, two authenticated `payment.captured`
-webhooks verified by raw-body HMAC with event-ID dedup and
-order/amount/currency/captured binding, then `PAID_VERIFIED` before
-fulfilment. Transaction 3 took a simulated fulfilment failure and issued a
-Razorpay Test Mode refund, `rfnd_TWVNeD4HStaNby`, confirmed processed.”
+Our separate August and September evidence covers three Razorpay Test Mode
+checkouts. Two `payment.captured` webhooks passed raw-body HMAC verification and
+event-ID deduplication. RunVista matched the order, amount, currency and captured
+status before moving to `PAID_VERIFIED` and fulfilment. Transaction three hit a
+simulated fulfilment failure. Refund `rfnd_TWVNeD4HStaNby` was processed."
 
-[Cue: mock pay on camera; cut to the Test Mode evidence still.]
+[Cue: Use mock payment on camera, then show the recorded Test Mode evidence.]
 
-## 3:10–3:45 — Graceful failure
+## 3:10 to 3:45 | A failure handled safely
 
-“The memorable failure, live in Demo Lab: ‘Price change after approval’ runs
-approve, then a material tool-retry price change, then stale retries — all in
-one request. The original approved digest is invalidated, state moves to
-`REAPPROVAL_REQUIRED`, the changed field is named, and both the stale approval
-and the stale payment are blocked. No code edits, no toast-only error.”
+"Now I break the order. In one request, 'Price change after approval'
+approves one price, then changes it during a tool retry. RunVista invalidates the original
+digest, names the changed field and moves to `REAPPROVAL_REQUIRED`. Both the stale
+approval and stale payment are blocked. No code edit is involved."
 
-[Cue: click ‘Price change after approval’; show digest, state, named change.]
+[Cue: Run "Price change after approval". Show the digest, state and changed field.]
 
-## 3:45–4:15 — Recovery + audit
+## 3:45 to 4:15 | Retries and the audit trail
 
-“Retries are safe. ‘Replay webhook’ delivers one `payment.captured` webhook
-twice under one event ID: first processed fresh, second deduplicated — one
-transition. A paid-but-unfulfillable order moves to an explicit refund, and
-the conformance suite holds 15 of 15 gates. The ‘Order & trust’ drawer shows
-intent through receipt: every material action, external ID, and decision.”
+"Webhook retries are safe too. This button sends one `payment.captured` event
+twice under the same ID. RunVista processes the first and deduplicates the second,
+leaving one transition. A paid order that cannot be fulfilled moves to an explicit
+refund.
 
-[Cue: replay notice, 15/15 gates, timeline scroll.]
+The conformance suite passes 15 of 15 gates. The 'Order & trust' drawer follows
+the order from intent to receipt, including each action, external ID and decision."
 
-## 4:15–5:00 — Razorpay value + scope honesty
+[Cue: Run the webhook replay. Show 15 of 15 checks, then scroll the timeline.]
 
-“AgentReady gives Razorpay the merchant-side control plane to scale agentic
-commerce beyond curated integrations, while payment execution and intelligence
-stay inside Razorpay.
+## 4:15 to 5:00 | Why it matters
 
-Vulcan can make payment intelligence smarter; RunVista makes the agent
-executing payment decisions bounded, explainable and auditable. Vulcan is
-explicitly not integrated. UPI Reserve Pay is out of scope without official
-access; UPI remains a method inside Razorpay Checkout.
+"RunVista gives Razorpay a merchant-side control layer for agentic commerce beyond
+curated integrations, while payment execution stays with Razorpay.
 
-The catalog is synthetic, the public demo is mock-only, Test Mode and Devnet
-are recorded evidence. What is real is the invariant: no silent cart change,
-no second charge, no fulfilment on unverified payment.”
+Vulcan could make that payment intelligence smarter in future. It is not
+integrated here. UPI Reserve Pay is also outside this build because we did not
+have official access. UPI remains a method in Razorpay Checkout.
+
+The catalog is synthetic. The public demo is mock-only. Test Mode and Devnet are
+recorded evidence. The rule is simple: no silent cart change, no second charge
+and no fulfilment until the payment is verified."

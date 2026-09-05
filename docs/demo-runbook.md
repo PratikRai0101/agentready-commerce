@@ -36,7 +36,7 @@
 | 1:05 | Reply `UK 9, road running` → Send (shortlist), then add `wide fit, max cushioning` → Send (mock fit scores). |
 | 1:35 | Still: Devnet explorer `5FQb8Jh7…?cluster=devnet` + evidence header. Narrate HTTP-500-then-reconciled caveat; scores on screen are mock. |
 | 1:50 | Max Cushion card → Select → approval panel → “Approve exact envelope hash” → “Order & trust” drawer. |
-| 2:30 | “Pay with Razorpay” → “Complete test payment”. Narrate mock IDs. |
+| 2:30 | “Choose payment method” → “Razorpay Checkout” → “Complete test payment”. Narrate mock IDs. (Alternate: “Agent Pay with x402” → review details → “Confirm mock payment”.) |
 | 2:55 | Stills: `docs/evidence/razorpay-test-proof.md` table (orders `order_TWTuHSmXrkHoUJ`, `order_TWVIgwsRyjV7C8`, `order_TWVLQtCV7OXCmI`; Razorpay Test Mode refund `rfnd_TWVNeD4HStaNby` processed). |
 | 3:10 | `/demo` → “Price change after approval” (self-contained `POST /api/demo/price-drift`). Show invalidated digest, `REAPPROVAL_REQUIRED`, named change, stale approval + payment blocked. |
 | 3:45 | “Replay webhook” (self-contained `POST /api/demo/webhook-replay`: first processed fresh, second deduplicated) → “Run conformance suite” (15/15) → drawer timeline scroll. |
