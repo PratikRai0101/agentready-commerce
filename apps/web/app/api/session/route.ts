@@ -11,6 +11,7 @@ export async function POST() {
     orderId: session.logicalOrderId,
     state: session.state,
     customerId: session.customerId,
+    sessionToken: await services.exportSession(session.logicalOrderId),
     rails: services.registry.all().map((adapter) => ({ rail: adapter.rail, isMock: adapter.isMock })),
     indicators: {
       razorpay: services.razorpayMode,

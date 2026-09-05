@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
 import type { AuditEvent } from "@agentready/audit";
 import type { PurchaseMandate } from "@agentready/domain";
-import type { EnvelopeRecord, Session } from "./services";
+import type { AppServices, EnvelopeRecord, Session } from "./services";
 
 /**
  * Signed, tamper-evident stateless session snapshot for mock-mode commerce.
@@ -67,12 +67,15 @@ export function openSnapshot(token: string, secret: string, nowIso?: string): Se
 /** Read a session token from header (preferred), body, or query string. */
 export function readSessionToken(
   request: Request,
-  body?: { sessionToken?: unknown } | null,
+  body?: unknown,
   url?: string,
 ): string | null {
   const header = request.headers.get("x-session-token");
   if (header && header.trim()) return header.trim();
-  if (body && typeof body.sessionToken === "string" && body.sessionToken) return body.sessionToken;
+  if (body && typeof body === "object" && body !== null && "sessionToken" in body) {
+    const value = (body as { sessionToken?: unknown }).sessionToken;
+    if (typeof value === "string" && value) return value;
+  }
   if (url) {
     try {
       const value = new URL(url).searchParams.get("st");
@@ -82,4 +85,27 @@ export function readSessionToken(
     }
   }
   return null;
+}
+
+/**
+ * Restore this order's sealed snapshot when the local instance never saw it
+ * (the normal case when consecutive requests land on different serverless
+ * instances). No-op when the session is already cached or no token arrives.
+ */
+export async function restoreSession(
+  services: AppServices,
+  orderId: string | undefined | null,
+  token: string | null,
+): Promise<void> {
+  if (!orderId || services.getSession(orderId) || !token) return;
+  await services.importSession(token);
+}
+
+/** Fresh sealed token for the response envelope (null when the order is unknown). */
+export async function tokenFor(
+  services: AppServices,
+  orderId: string | undefined | null,
+): Promise<string | null> {
+  if (!orderId) return null;
+  return services.exportSession(orderId);
 }

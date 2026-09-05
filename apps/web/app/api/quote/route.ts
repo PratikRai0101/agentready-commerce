@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServices, QuoteValidationError, type RecommendationBinding } from "@/lib/services";
+import { readSessionToken, restoreSession, tokenFor } from "@/lib/session-token";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,7 @@ export async function POST(request: Request) {
   }
   const services = getServices();
   try {
+    await restoreSession(services, orderId, readSessionToken(request, body));
     const binding: RecommendationBinding | undefined =
       typeof body.intentVersion === "number" &&
       typeof body.recommendationVersion === "number" &&
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
           }
         : undefined;
     const quote = await services.buildQuote(orderId, productId, binding);
-    return NextResponse.json(quote);
+    return NextResponse.json({ ...quote, sessionToken: await tokenFor(services, orderId) });
   } catch (error) {
     if (error instanceof QuoteValidationError) {
       return NextResponse.json(
@@ -40,6 +42,7 @@ export async function POST(request: Request) {
           ...error.binding,
           selectionRejected: true,
           rejectedProductId: error.rejectedProductId,
+          sessionToken: await tokenFor(services, orderId),
         },
         { status: 409 },
       );

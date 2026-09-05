@@ -11,6 +11,7 @@ export async function POST() {
     ok: true,
     orderId: session.logicalOrderId,
     state: session.state,
+    sessionToken: await services.exportSession(session.logicalOrderId),
     message: "Fresh-demo reset complete: sessions, envelopes, webhook dedup and machine resource state cleared.",
   });
 }

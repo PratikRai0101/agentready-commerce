@@ -85,7 +85,9 @@ describe("stateless session handoff", () => {
     const a = freshServices();
     const { orderId } = await runToApproved(a);
     const token = (await a.exportSession(orderId))!;
-    const [payload, sig] = token.split(".");
+    const parts = token.split(".");
+    expect(parts.length).toBe(2);
+    const [payload, sig] = parts as [string, string];
 
     const b = freshServices();
     const flipped = `${payload.slice(0, -1)}${payload.endsWith("A") ? "B" : "A"}.${sig}`;

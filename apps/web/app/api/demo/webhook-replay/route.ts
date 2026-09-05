@@ -94,6 +94,7 @@ export async function POST() {
       first: { processed: "processed" in first ? first.processed : false, deduplicated: "deduplicated" in first ? first.deduplicated : false },
       second: { processed: "processed" in second ? second.processed : false, deduplicated: "deduplicated" in second ? second.deduplicated : false },
       events,
+      sessionToken: await services.exportSession(orderId),
     });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
