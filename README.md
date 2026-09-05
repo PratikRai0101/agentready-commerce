@@ -4,6 +4,25 @@ A merchant-specific AI sales agent that turns ambiguous intent into a justified 
 
 Built for the Razorpay Buildathon, Track 01 (AI Growth & Agentic Commerce). Full product rationale in [`docs/`](docs/product-spec.md) (spec, architecture, decisions, demo script, implementation plan).
 
+## Demo
+
+- **Public demo (mock-only):** `https://agentready-commerce-pied.vercel.app` (`/demo` for Demo Lab).
+  The public host runs `razorpay: mock`, `x402: mock`, `llm: disabled` with
+  `X402_SETTLEMENT_ENABLED=false` and no Razorpay keys, database, keypair, or
+  Mainnet configuration. Money steps there create `order_MOCK_*` / `pay_MOCK_*`
+  IDs only — no funds move. Verified in
+  [`docs/evidence/public-demo-preflight.md`](docs/evidence/public-demo-preflight.md)
+  §5 (public-alias smoke: storefront 42/42 + prototype 20/20, zero egress).
+- **Recorded evidence (not performed by the public demo):** Razorpay Test Mode
+  lifecycle (2026-08-31/09-01) and Solana Devnet settlements (2026-09-02,
+  2026-09-04) below. The pitch shows them as screenshots, never as live calls.
+- **Submission package:** [`docs/pitch-script.md`](docs/pitch-script.md) (5:00
+  script) · [`docs/recording-plan.md`](docs/recording-plan.md) (scenes, exact
+  URLs/clicks/narration) · [`docs/demo-runbook.md`](docs/demo-runbook.md)
+  (live runbook + prerecorded fallback) ·
+  [`docs/architecture-explainer.md`](docs/architecture-explainer.md) ·
+  [`docs/claims-evidence-checklist.md`](docs/claims-evidence-checklist.md).
+
 ## What it demonstrates
 
 The tracer bullet (fully deterministic, no external service required to demo):
@@ -82,6 +101,9 @@ packages/conformance  10 critical invariants (gate suite) over a plane contract
 
 ## Architecture
 
+Concise explainer: [`docs/architecture-explainer.md`](docs/architecture-explainer.md).
+Full contract: [`docs/architecture.md`](docs/architecture.md).
+
 ```text
 Customer / buyer agent
         │
@@ -103,6 +125,69 @@ Razorpay adapter (INR retail checkout)
 Fulfilment/refund state machine → unified audit timeline
 ```
 
+Approval binds to the SHA-256 hash of the exact Commerce Envelope; any
+material change (SKU, variant, quantity, amounts, currency, recipient,
+delivery, returns, mandate, expiry) requires reapproval before payment. One
+logical retail order may have at most one successful rail.
+
+## Verified Razorpay Test Mode evidence (recorded 2026-08-31/09-01)
+
+Real Test Mode checkouts plus dashboard-configured `payment.captured`
+webhooks (raw-body HMAC, `x-razorpay-event-id` dedup,
+order/amount/currency/captured binding). Safe identifiers only; full record in
+[`docs/evidence/razorpay-test-proof.md`](docs/evidence/razorpay-test-proof.md):
+
+| Transaction | Order / payment / webhook | Result |
+|---|---|---|
+| 1 — client-verified | `order_TWTuHSmXrkHoUJ` / `pay_TWU2Fy64pOAaZi` | ₹3848.00 INR captured → `PAID_VERIFIED` |
+| 2 — webhook-verified | `order_TWVIgwsRyjV7C8` / `pay_TWVJ9xLsjtdwoo` / event `TWVJJZ01UBcNy1` | HTTP 200 accepted → `PAID_VERIFIED` |
+| 3 — webhook + refund | `order_TWVLQtCV7OXCmI` / `pay_TWVLknN4NRrHSN` / event `TWVLtSP9a4RfZ4` | ₹4348.00 captured, fulfilment failure, refund `rfnd_TWVNeD4HStaNby` `processed` → `REFUNDED` |
+
+Duplicate webhook replays are deduplicated; unsupported events return HTTP 200
+`ignored`. Test Mode credentials stay in gitignored `apps/web/.env.local` and
+never reach the repository or the public demo.
+
+## Verified x402 Devnet evidence (recorded, test tokens only)
+
+x402 v2 `exact`, Solana Devnet (`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`),
+Devnet USDC (`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`), 0.010000 USDC
+per settlement, memo `agentcart:v1:{requestDigest}`, full envelope off-chain.
+No real money, no Mainnet activity, no second submission per run:
+
+- **Application path (2026-09-04):**
+  [`docs/devnet-settlement-evidence-app-path-2026-09-04.md`](docs/devnet-settlement-evidence-app-path-2026-09-04.md) —
+  session `ord_ec64c3682612`, payment `pay_appath_1788535423482`, tx
+  [`5FQb8Jh7…`](https://explorer.solana.com/tx/5FQb8Jh7LTmwoecXpv7TGDos61oFqo66T74uYY6mA6cWuD2EaHTQ73FsY2EZ99Wsj7j3SknsT4WE8vDmGxtt1Vfk?cluster=devnet)
+  (slot `493082743`, finalized, `meta.err` null), reconciled via
+  `operator-cli reconcile-settled` with zero replacement submissions.
+- **Harness settlement (2026-09-02):**
+  [`docs/devnet-settlement-evidence.md`](docs/devnet-settlement-evidence.md) —
+  tx
+  [`9Z795iRrqkymKipM3XTY7q3gY7FZ2qvUFQKisnewPmhKH3opqzyVq2gmyPxrrJ8ez2KxSDHdXvJ8qeqkKKZi4JM`](https://explorer.solana.com/tx/9Z795iRrqkymKipM3XTY7q3gY7FZ2qvUFQKisnewPmhKH3opqzyVq2gmyPxrrJ8ez2KxSDHdXvJ8qeqkKKZi4JM?cluster=devnet)
+  (slot `492017649`, finalized). Replay coverage remains offline-only; the
+  application never resubmits a settled payment identifier.
+
+The x402 spend buys the premium fit-scoring resource under a separate
+tool-spend mandate — it is not a second charge for the shoes, and a retail
+refund is always the Razorpay refund, never an x402 “reversal”.
+
+## Safety controls
+
+- Deterministic policy gates every money step (mandate, merchant, SKU, amount,
+  expiry, approval hash); the LLM is advisory only.
+- Fulfilment begins only after rail-specific verification (Razorpay signature +
+  order/amount/currency/captured binding; x402 finalized settlement check).
+- Idempotent order creation, approval, refunds, and webhook handling
+  (`x-razorpay-event-id` dedup, Stable Payment Identifier on x402); one
+  logical order → at most one successful rail.
+- Kill-switches default safe: `X402_MODE=mock`, `X402_SETTLEMENT_ENABLED=false`,
+  `X402_LIVE_DEVNET_TEST=0` on the public host; live Devnet runs stay
+  approval-gated per [`docs/devnet-preflight.md`](docs/devnet-preflight.md).
+- Secrets hygiene: `.env.local` / `data/proof/` / keypairs gitignored; logs and
+  audit events carry safe IDs only — never keys, signatures, raw payloads,
+  card/contact data, or chain private material. On-chain memos carry only the
+  request digest.
+
 ## Honest claims
 
 - Approval binds to the exact envelope hash; any material change requires reapproval.
@@ -111,7 +196,26 @@ Fulfilment/refund state machine → unified audit timeline
 - x402 is used for agent tool spend on a digital resource (premium fit-scoring API), memo-anchored to the request digest. Mock settlements are clearly labelled; no synthetic data is presented as live.
 - Devnet settlements are labelled "x402 SOLANA DEVNET — test tokens, no real money" and include verified on-chain memo evidence where available.
 - The conformance suite verifies *our declared invariants*; it is not an independent certification of Razorpay, Solana, x402 or any third party.
-- Vulcan is not claimed — no official interface was available. A neutral seam is documented in `docs/architecture.md`.
+- Vulcan is not integrated and no public integration interface was used; no mock output is labelled as Vulcan. A neutral seam is documented in `docs/architecture.md`. Future alignment only: “Vulcan can make payment intelligence smarter; RunVista makes the agent executing payment decisions bounded, explainable and auditable.”
+- UPI is a payment method within Razorpay Checkout; UPI Reserve Pay is a conditional agentic authorization mode, out of scope without official access.
+
+## Known limitations
+
+- Public demo is mock-only and in-memory per instance: no real Razorpay/Test Mode
+  or Devnet execution, and a horizontally scaled host may rarely show an
+  unknown-session error (reload; see
+  [`docs/evidence/public-demo-preflight.md`](docs/evidence/public-demo-preflight.md)).
+- Catalog is synthetic demo data for the fictional RunVista Sports merchant
+  (6 products); no real inventory, delivery, or customer profile.
+- x402 replay of a live settlement through the app path is covered offline-only;
+  the two Devnet settlements are single-run recorded evidence each.
+- LLM cost figures beyond the theoretical $0.0022 ceiling in
+  [`docs/evidence/llm-verification-3msg.md`](docs/evidence/llm-verification-3msg.md)
+  require the provider console; exact per-call tokens were unavailable for that run.
+- Repository visibility is currently private; the public artifact is the Vercel
+  demo alias until the owner flips it. Test suites were last measured at
+  411 passed / 1 skipped across 20 files (2026-09-04); re-run `pnpm test` and
+  `pnpm typecheck` before judging.
 
 ## Product thesis
 
