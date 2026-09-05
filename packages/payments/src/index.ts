@@ -19,6 +19,8 @@ export {
   DEVNET_FIT_SCORE_PURPOSE,
   buildDevnetToolSpendRequest,
   canonicalToolSpendRequestDigest,
+  canonicalOrderPaymentRequestDigest,
+  mockOrderPaymentIdentifier,
   buildCanonicalRequirements,
   verifyCanonicalRequirements,
   adaptSettlement,
@@ -28,6 +30,12 @@ export {
   checkBlockhashExpired,
 } from "./x402";
 export type { BlockhashValidity } from "./x402";
+export {
+  X402_MOCK_ORDER_NETWORK,
+  X402_MOCK_ORDER_ASSET,
+  X402_MOCK_ORDER_PAYEE,
+  X402_MOCK_ORDER_PURPOSE,
+} from "./x402";
 export type {
   X402PaymentOption,
   PaymentRequired,
@@ -37,6 +45,7 @@ export type {
   X402ResourceResult,
   X402MachineAdapter,
   ToolSpendRequest,
+  OrderPaymentRequest,
   CanonicalPaymentRequirements,
   AdaptedSettlement,
   MemoVerificationState,
