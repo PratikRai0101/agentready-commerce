@@ -5,7 +5,7 @@ immediately before submission; do not carry forward stale claims.
 
 ## Verified (re-run on submission day)
 
-- [ ] Unit suite green: `pnpm -r test` (last measured: 557 passed / 12 skipped — apps/web 462/12, packages 95 — 2026-09-05; conformance 15/15)
+- [ ] Unit suite green: `pnpm -r test` (last measured: 575 passed / 12 skipped — apps/web 480/12, packages 95 — 2026-09-05; conformance 15/15)
 - [ ] Typecheck clean: `pnpm lint`
 - [ ] No whitespace errors: `git diff --check`
 - [ ] Mock browser smoke: `PORT=31xx node apps/web/test/browser-smoke.mjs` against a mock-env server (last: 38/38 desktop+mobile)

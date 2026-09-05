@@ -180,7 +180,7 @@ export type AppServices = {
   /** Seal this order's exact server state into a tamper-evident token (null when unknown). */
   exportSession(orderId: string): Promise<string | null>;
   /** Restore a sealed snapshot (e.g. on a serverless instance that never saw this order). */
-  importSession(token: string): Promise<{ ok: true; orderId: string; state: OrderState } | { ok: false; error: string }>;
+  importSession(token: string, expectedOrderId?: string): Promise<{ ok: true; orderId: string; state: OrderState } | { ok: false; error: string }>;
   getMandate(customerId: string): PurchaseMandate | undefined;
   isWebhookProcessed(eventId: string): boolean;
   markWebhookProcessed(eventId: string): void;
@@ -361,10 +361,13 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       return sealSnapshot(snapshot, signingSecret);
     },
 
-    async importSession(token) {
+    async importSession(token, expectedOrderId) {
       const snapshot = openSnapshot(token, signingSecret);
       if (!snapshot) {
         return { ok: false as const, error: "Invalid or expired session token — start a new conversation." };
+      }
+      if (expectedOrderId && snapshot.session.logicalOrderId !== expectedOrderId) {
+        return { ok: false as const, error: "Session token does not match this order — start a new conversation." };
       }
       if (snapshot.envelope && envelopeDigest(snapshot.envelope.envelope) !== snapshot.envelope.digest) {
         return { ok: false as const, error: "Session snapshot failed integrity check — start a new conversation." };

@@ -88,17 +88,22 @@ export function readSessionToken(
 }
 
 /**
- * Restore this order's sealed snapshot when the local instance never saw it
- * (the normal case when consecutive requests land on different serverless
- * instances). No-op when the session is already cached or no token arrives.
+ * Restore this order's sealed snapshot.
+ *
+ * The presented token always wins over locally cached state: the token is the
+ * latest sealed truth the server issued, while local memory may hold an older
+ * copy (e.g. this instance created the session but the conversation continued
+ * elsewhere). Audit history merges append-only with event-id dedup, so nothing
+ * is ever lost by adopting the newer snapshot. Callers are single-client UI
+ * flows that always present the newest token they hold.
  */
 export async function restoreSession(
   services: AppServices,
   orderId: string | undefined | null,
   token: string | null,
 ): Promise<void> {
-  if (!orderId || services.getSession(orderId) || !token) return;
-  await services.importSession(token);
+  if (!orderId || !token) return;
+  await services.importSession(token, orderId);
 }
 
 /** Fresh sealed token for the response envelope (null when the order is unknown). */

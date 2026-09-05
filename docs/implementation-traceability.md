@@ -109,7 +109,7 @@ the detailed local record. Test date: 2026-08-31/2026-09-01 (local proof files).
 | Reproducible local setup | Done (`pnpm install && pnpm dev`) |
 | `.env.example` with no secrets | Done (`apps/web/.env.example`; local values only in gitignored `.env.local`) |
 | Architecture diagram | `docs/architecture.md` + README |
-| Meaningful tests and final results | 557 passed / 12 skipped (apps/web 462/12 across 23 files + 1 skipped file; packages 95 across 7 files; measured 2026-09-05), 15/15 conformance gates |
+| Meaningful tests and final results | 575 passed / 12 skipped (apps/web 480/12 across 24 files + 1 skipped file; packages 95 across 7 files; measured 2026-09-05), 15/15 conformance gates |
 | Razorpay test-mode proof | **Done** — real Test Mode checkout ×3, authenticated `payment.captured` webhook ×2, processed refund ×1 (`docs/implementation-traceability.md` § Razorpay Test Mode proof, `docs/evidence/razorpay-test-proof.md`) |
 | Five-minute pitch video | **Pending** |
 | Disclosure of mocks/synthetic data | Done (badges, audit `mock` flags, README) |

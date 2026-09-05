@@ -219,10 +219,11 @@ refund is always the Razorpay refund, never an x402 “reversal”.
 
 ## Known limitations
 
-- Public demo is mock-only and in-memory per instance: no real Razorpay/Test Mode
-  or Devnet execution, and a horizontally scaled host may rarely show an
-  unknown-session error (reload; see
-  [`docs/evidence/public-demo-preflight.md`](docs/evidence/public-demo-preflight.md)).
+- Public demo is mock-only: no real Razorpay/Test Mode or Devnet execution.
+  Sequential requests carry a sealed session token (`x-session-token` header or
+  `sessionToken` body field), so multi-request flows survive across serverless
+  instances — see “Stateless demo sessions” below. A missing, forged or expired
+  token returns an unknown-session error (reload and start a new conversation).
 - Catalog is synthetic demo data for the fictional RunVista Sports merchant
   (6 products); no real inventory, delivery, or customer profile.
 - x402 replay of a live settlement through the app path is covered offline-only;
@@ -231,10 +232,28 @@ refund is always the Razorpay refund, never an x402 “reversal”.
   [`docs/evidence/llm-verification-3msg.md`](docs/evidence/llm-verification-3msg.md)
   require the provider console; exact per-call tokens were unavailable for that run.
 - Repository is public; the live demo alias is the Vercel deployment above.
-  Test suites were last measured at 557 passed / 12 skipped (apps/web: 462
-  passed / 12 skipped across 23 files + 1 skipped file; packages: 95 passed
+  Test suites were last measured at 575 passed / 12 skipped (apps/web: 480
+  passed / 12 skipped across 24 files + 1 skipped file; packages: 95 passed
   across 7 files; 2026-09-05) with conformance 15/15; re-run `pnpm test` and
   `pnpm typecheck` before judging.
+
+## Stateless demo sessions
+
+Mock-mode commerce sessions survive across Vercel serverless instances without
+any database. Every commerce response reseals the order's exact server state —
+session, approved envelope, mandate and audit history — into a compressed
+`sessionToken` (HMAC-SHA256 with the server signing secret, 24-hour expiry).
+Each request presents it back via the `x-session-token` header (or
+`sessionToken` field); the server rehydrates that instance and continues.
+Tampering breaks the signature, so unsigned client-supplied prices,
+recipients, approval or payment state are never trusted; envelope approval,
+quote expiry and one-order-one-rail enforcement still run deterministically on
+the restored state. Inbound Razorpay webhooks (which carry no token) and
+client-supplied operation replays remain instance-local by design.
+
+Isolation: demo snapshots never touch the x402 settlement store, its
+migrations, or any payment credentials — no `DATABASE_URL` is configured on
+the web host, and no migration was added or run for this change.
 
 ## Product thesis
 
