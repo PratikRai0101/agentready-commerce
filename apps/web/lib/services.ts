@@ -160,7 +160,7 @@ export type AppServices = {
   approve(orderId: string, digest: string, operationId?: string): Promise<{ ok: boolean; approvalEventId?: string; state: OrderState; error?: string }>;
   initiatePayment(orderId: string, rail: string, operationId?: string): Promise<{ ok: boolean; attempt?: PaymentAttempt; state: OrderState; error?: string; reasonCodes?: string[] }>;
   prepareX402OrderPayment(orderId: string, operationId?: string): Promise<{ ok: boolean; payment?: X402OrderPayment; state: OrderState; error?: string; reasonCodes?: string[] }>;
-  confirmX402OrderPayment(orderId: string, paymentIdentifier: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string; reasonCodes?: string[] }>;
+  confirmX402OrderPayment(orderId: string, paymentIdentifier: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; payment?: X402OrderPayment; error?: string; reasonCodes?: string[] }>;
   mockCapture(orderId: string): Promise<{ paymentId: string; signature: string; orderId: string }>;
   verifyPayment(orderId: string, externalOrderId: string, externalPaymentId: string, signature: string, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
   fulfil(orderId: string, fail: boolean, operationId?: string): Promise<{ ok: boolean; state: OrderState; error?: string }>;
@@ -773,7 +773,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
       }
 
       if (session.state === "PAID_VERIFIED" || session.state === "FULFILMENT_PENDING" || session.state === "FULFILLED") {
-        const r = { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected." };
+        const r = { ok: false, state: session.state, error: "This order already has a successful payment; new rail initiation is rejected.", reasonCodes: ["rail_single_success"] };
         if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
         return r;
       }
@@ -889,10 +889,10 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
 
     async mockCapture(orderId) {
       const session = sessions.get(orderId);
-      if (!session || !session.externalOrderId) throw new Error("No initiated order");
-      if (session.x402OrderPayment?.status === "verified") {
+      if (session?.x402OrderPayment?.status === "verified") {
         throw new Error("Order already settled via Agent Pay (x402 mock); Razorpay capture is rejected.");
       }
+      if (!session || !session.externalOrderId) throw new Error("No initiated order");
       const paymentId = `pay_MOCK_${session.externalOrderId}_${Date.now()}`;
       const signature = razorpaySignature(razorpayKeySecret, `${session.externalOrderId}|${paymentId}`);
       return { paymentId, signature, orderId: session.externalOrderId };
@@ -925,23 +925,8 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         return r;
       }
 
-      if (externalOrderId !== session.externalOrderId) {
-        void audit.log({
-          logicalOrderId: orderId,
-          type: "payment.binding_rejected",
-          actor: "policy",
-          summary: `Submitted Razorpay order ${externalOrderId} does not match session order ${session.externalOrderId}`,
-          decision: "block",
-          reasonCodes: ["order_id_mismatch"],
-        });
-        setState(session, "PAYMENT_FAILED");
-        const r = { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
-        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
-        return r;
-      }
-
       if (session.verification?.verified) {
-        if (session.verification.rail === "razorpay_checkout" && externalPaymentId === session.externalPaymentId) {
+        if (session.verification.rail === "razorpay_checkout" && externalOrderId === session.externalOrderId && externalPaymentId === session.externalPaymentId) {
           const r = { ok: true, state: session.state };
           if (operationId) coordinator.complete(operationId, "success", externalPaymentId, undefined, r);
           return r;
@@ -953,6 +938,21 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
           decision: "block", reasonCodes: ["rail_single_success"],
         });
         const r = { ok: false, state: session.state, error: "This order already settled on another rail; Razorpay verification is rejected." };
+        if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
+        return r;
+      }
+
+      if (externalOrderId !== session.externalOrderId) {
+        void audit.log({
+          logicalOrderId: orderId,
+          type: "payment.binding_rejected",
+          actor: "policy",
+          summary: `Submitted Razorpay order ${externalOrderId} does not match session order ${session.externalOrderId}`,
+          decision: "block",
+          reasonCodes: ["order_id_mismatch"],
+        });
+        setState(session, "PAYMENT_FAILED");
+        const r = { ok: false, state: session.state, error: "Submitted Razorpay order does not match this session's order" };
         if (operationId) coordinator.complete(operationId, "failure", undefined, r.error, r);
         return r;
       }
@@ -1257,6 +1257,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         status: "captured",
       };
       session.externalPaymentId = paymentIdentifier;
+      setState(session, "PAYMENT_PENDING");
       setState(session, "PAID_VERIFIED");
       void audit.log({
         logicalOrderId: orderId, type: "x402_order.verified", actor: "payment",
@@ -1264,7 +1265,7 @@ export function getServices(env: NodeJS.ProcessEnv = process.env, options?: { fo
         externalReferences: { paymentIdentifier, mockTxHash: pending.mockTxHash, envelopeDigest: record.digest },
         decision: "allow", reasonCodes: ["mock_settlement_verified", "rail_binding_verified", "rail_single_success"],
       });
-      const confirmResult = { ok: true, state: session.state } as const;
+      const confirmResult = { ok: true, state: session.state, payment: { ...pending } } as const;
       if (operationId) coordinator.complete(operationId, "success", paymentIdentifier, undefined, confirmResult);
       return confirmResult;
       });

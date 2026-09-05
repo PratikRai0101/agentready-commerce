@@ -217,8 +217,12 @@ describe("out-of-order webhooks", () => {
     expect(webhook.held).toBe(false);
     expect(session.state).toBe("PAID_VERIFIED");
 
-    const capture = await services.mockCapture(orderId);
-    const client = await services.verifyPayment(orderId, capture.orderId, capture.paymentId, capture.signature);
+    // Client reconciliation presents the SAME webhook-settled payment: replay, ok.
+    // (A different payment id after settlement is a new settlement attempt and
+    // must be rejected — see rail-selector exclusivity tests.)
+    const settledPaymentId = (JSON.parse(rawBody) as { payload: { payment: { entity: { id: string } } } }).payload.payment.entity.id;
+    const clientSig = razorpaySignature("mock_secret", `${session.externalOrderId}|${settledPaymentId}`);
+    const client = await services.verifyPayment(orderId, session.externalOrderId!, settledPaymentId, clientSig);
     expect(client.ok).toBe(true);
     expect(session.state).toBe("PAID_VERIFIED");
     const verifiedEvents = (await services.timeline(orderId)).filter((e) => e.type === "payment.verified" || e.type === "payment.verified_via_webhook");
